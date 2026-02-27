@@ -1,0 +1,390 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Z80 CPU Test Harness}
+\author{SingleStepTests Integration}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+This test harness validates our Z80 implementation against the SingleStepTests/z80
+test suite. Each JSON file contains 1000 randomized test cases for a single opcode.
+For each test case, the harness:
+\begin{enumerate}
+\item Sets up a flat 64~KB memory with the test's initial RAM contents
+\item Loads the test's initial register state into the Z80
+\item Executes exactly one instruction
+\item Compares all registers and RAM against the expected final state
+\end{enumerate}
+
+The test uses a flat memory model (not the Berzerk memory map) because the
+tests need arbitrary read/write access to the full 64~KB address space.
+
+\section{Test Runner}
+
+<<z80_test.cpp>>=
+#include "z80.h"
+#include "../third_party/json.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <algorithm>
+
+using json = nlohmann::json;
+
+<<flat memory for tests>>
+<<test state loader>>
+<<test state comparator>>
+<<run single test file>>
+<<test main>>
+@
+
+\subsection{Flat Memory}
+
+The test suite needs a simple 64~KB memory with no mapping logic. We create
+an [[AddressSpace]] backed by a flat byte array. I/O space is similarly flat
+(256 bytes). Both support unrestricted read/write.
+
+<<flat memory for tests>>=
+static uint8_t test_mem[65536];
+static uint8_t test_io[256];
+
+static AddressSpace make_flat_program()
+{
+    AddressSpace as("test-program", 0xFFFF);
+    std::memset(test_mem, 0, sizeof(test_mem));
+    as.map(0x0000, 0xFFFF,
+        [](uint16_t addr) -> uint8_t { return test_mem[addr]; },
+        [](uint16_t addr, uint8_t data) { test_mem[addr] = data; },
+        "flat-ram");
+    return as;
+}
+
+static AddressSpace make_flat_io()
+{
+    AddressSpace as("test-io", 0xFF);
+    std::memset(test_io, 0, sizeof(test_io));
+    as.map(0x00, 0xFF,
+        [](uint16_t addr) -> uint8_t { return test_io[addr & 0xFF]; },
+        [](uint16_t addr, uint8_t data) { test_io[addr & 0xFF] = data; },
+        "flat-io");
+    return as;
+}
+@
+
+\subsection{State Loader}
+
+Load initial CPU and memory state from a JSON test object.
+
+<<test state loader>>=
+static void load_state(Z80& cpu, const json& state)
+{
+    cpu.set_pc(state["pc"].get<uint16_t>());
+    cpu.set_sp(state["sp"].get<uint16_t>());
+
+    uint8_t a = state["a"].get<uint8_t>();
+    uint8_t f = state["f"].get<uint8_t>();
+    cpu.set_af((a @<< 8) | f);
+
+    uint8_t b = state["b"].get<uint8_t>();
+    uint8_t c = state["c"].get<uint8_t>();
+    cpu.set_bc((b @<< 8) | c);
+
+    uint8_t d = state["d"].get<uint8_t>();
+    uint8_t e = state["e"].get<uint8_t>();
+    cpu.set_de((d @<< 8) | e);
+
+    uint8_t h = state["h"].get<uint8_t>();
+    uint8_t l = state["l"].get<uint8_t>();
+    cpu.set_hl((h @<< 8) | l);
+
+    cpu.set_ix(state["ix"].get<uint16_t>());
+    cpu.set_iy(state["iy"].get<uint16_t>());
+    cpu.set_wz(state["wz"].get<uint16_t>());
+
+    cpu.set_af2(state["af_"].get<uint16_t>());
+    cpu.set_bc2(state["bc_"].get<uint16_t>());
+    cpu.set_de2(state["de_"].get<uint16_t>());
+    cpu.set_hl2(state["hl_"].get<uint16_t>());
+
+    cpu.set_i(state["i"].get<uint8_t>());
+    cpu.set_r(state["r"].get<uint8_t>());
+
+    cpu.set_iff1(state["iff1"].get<uint8_t>());
+    cpu.set_iff2(state["iff2"].get<uint8_t>());
+    cpu.set_im(state["im"].get<uint8_t>());
+
+    cpu.set_halted(false);
+
+    // Q register for SCF/CCF undocumented behavior
+    cpu.set_q(state["q"].get<uint8_t>());
+
+    // Load RAM contents
+    std::memset(test_mem, 0, sizeof(test_mem));
+    for (const auto& entry : state["ram"]) {
+        uint16_t addr = entry[0].get<uint16_t>();
+        uint8_t val = entry[1].get<uint8_t>();
+        test_mem[addr] = val;
+    }
+}
+@
+
+\subsection{State Comparator}
+
+Compare actual CPU and memory state against expected final state.
+Returns true if all fields match. On mismatch, prints the first
+difference found.
+
+<<test state comparator>>=
+struct Mismatch {
+    std::string field;
+    uint32_t expected;
+    uint32_t actual;
+};
+
+static bool compare_state(Z80& cpu, const json& expected, const std::string& /*test_name*/,
+                          std::vector<Mismatch>& mismatches)
+{
+    mismatches.clear();
+    bool ok = true;
+
+    auto check16 = [&](const char* name, uint16_t actual, uint16_t exp) {
+        if (actual != exp) {
+            mismatches.push_back({name, exp, actual});
+            ok = false;
+        }
+    };
+
+    auto check8 = [&](const char* name, uint8_t actual, uint8_t exp) {
+        if (actual != exp) {
+            mismatches.push_back({name, exp, actual});
+            ok = false;
+        }
+    };
+
+    check16("pc", cpu.get_pc(), expected["pc"].get<uint16_t>());
+    check16("sp", cpu.get_sp(), expected["sp"].get<uint16_t>());
+
+    uint8_t exp_a = expected["a"].get<uint8_t>();
+    uint8_t exp_f = expected["f"].get<uint8_t>();
+    check8("a", (cpu.get_af() >> 8) & 0xFF, exp_a);
+    check8("f", cpu.get_af() & 0xFF, exp_f);
+
+    uint8_t exp_b = expected["b"].get<uint8_t>();
+    uint8_t exp_c = expected["c"].get<uint8_t>();
+    check8("b", (cpu.get_bc() >> 8) & 0xFF, exp_b);
+    check8("c", cpu.get_bc() & 0xFF, exp_c);
+
+    uint8_t exp_d = expected["d"].get<uint8_t>();
+    uint8_t exp_e = expected["e"].get<uint8_t>();
+    check8("d", (cpu.get_de() >> 8) & 0xFF, exp_d);
+    check8("e", cpu.get_de() & 0xFF, exp_e);
+
+    uint8_t exp_h = expected["h"].get<uint8_t>();
+    uint8_t exp_l = expected["l"].get<uint8_t>();
+    check8("h", (cpu.get_hl() >> 8) & 0xFF, exp_h);
+    check8("l", cpu.get_hl() & 0xFF, exp_l);
+
+    check16("ix", cpu.get_ix(), expected["ix"].get<uint16_t>());
+    check16("iy", cpu.get_iy(), expected["iy"].get<uint16_t>());
+    check16("wz", cpu.get_wz(), expected["wz"].get<uint16_t>());
+
+    check16("af'", cpu.get_af2(), expected["af_"].get<uint16_t>());
+    check16("bc'", cpu.get_bc2(), expected["bc_"].get<uint16_t>());
+    check16("de'", cpu.get_de2(), expected["de_"].get<uint16_t>());
+    check16("hl'", cpu.get_hl2(), expected["hl_"].get<uint16_t>());
+
+    check8("i", cpu.get_i(), expected["i"].get<uint8_t>());
+    check8("r", cpu.get_r(), expected["r"].get<uint8_t>());
+
+    check8("iff1", cpu.get_iff1(), expected["iff1"].get<uint8_t>());
+    check8("iff2", cpu.get_iff2(), expected["iff2"].get<uint8_t>());
+    check8("im", cpu.get_im(), expected["im"].get<uint8_t>());
+    check8("q", cpu.get_q(), expected["q"].get<uint8_t>());
+
+    // Check RAM
+    for (const auto& entry : expected["ram"]) {
+        uint16_t addr = entry[0].get<uint16_t>();
+        uint8_t exp_val = entry[1].get<uint8_t>();
+        uint8_t actual_val = test_mem[addr];
+        if (actual_val != exp_val) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "ram[0x%04X]", addr);
+            mismatches.push_back({buf, exp_val, actual_val});
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+@
+
+\subsection{Running a Test File}
+
+Each JSON file contains an array of ~1000 test cases for one opcode.
+We run all tests and report the pass/fail count.
+
+<<run single test file>>=
+struct TestResult {
+    std::string filename;
+    int total;
+    int passed;
+    int failed;
+    std::string first_failure;
+};
+
+static TestResult run_test_file(const std::string& path)
+{
+    TestResult result;
+    result.filename = std::filesystem::path(path).filename().string();
+    result.total = 0;
+    result.passed = 0;
+    result.failed = 0;
+
+    std::ifstream ifs(path);
+    if (!ifs.is_open()) {
+        result.first_failure = "cannot open file";
+        return result;
+    }
+
+    json tests;
+    try {
+        tests = json::parse(ifs);
+    } catch (const json::parse_error& e) {
+        result.first_failure = std::string("JSON parse error: ") + e.what();
+        return result;
+    }
+
+    AddressSpace prog = make_flat_program();
+    AddressSpace io = make_flat_io();
+    Z80 cpu(prog, io);
+
+    std::vector<Mismatch> mismatches;
+
+    for (const auto& test : tests) {
+        result.total++;
+        std::string test_name = test["name"].get<std::string>();
+
+        // Load initial state
+        load_state(cpu, test["initial"]);
+
+        // Pre-load I/O port values for read operations
+        std::memset(test_io, 0, sizeof(test_io));
+        if (test.contains("ports")) {
+            for (const auto& port_op : test["ports"]) {
+                if (port_op[2].get<std::string>() == "r") {
+                    uint16_t port_addr = port_op[0].get<uint16_t>();
+                    uint8_t port_val = port_op[1].get<uint8_t>();
+                    test_io[port_addr & 0xFF] = port_val;
+                }
+            }
+        }
+
+        // Execute exactly one instruction
+        cpu.step();
+
+        // Compare final state
+        if (compare_state(cpu, test["final"], test_name, mismatches)) {
+            result.passed++;
+        } else {
+            result.failed++;
+            if (result.first_failure.empty()) {
+                result.first_failure = test_name + ": ";
+                for (size_t i = 0; i < mismatches.size() && i < 3; i++) {
+                    if (i > 0) result.first_failure += ", ";
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf), "%s exp=0x%X got=0x%X",
+                                  mismatches[i].field.c_str(),
+                                  mismatches[i].expected,
+                                  mismatches[i].actual);
+                    result.first_failure += buf;
+                }
+                if (mismatches.size() > 3) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), " (+%zu more)",
+                                  mismatches.size() - 3);
+                    result.first_failure += buf;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+@
+
+\subsection{Main}
+
+The test runner accepts either a directory of JSON files or individual
+file paths. It runs each file and prints a summary.
+
+<<test main>>=
+int main(int argc, char* argv[])
+{
+    if (argc < 2) {
+        std::fprintf(stderr, "Usage: %s <test-dir-or-file> [file...]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    std::vector<std::string> files;
+
+    for (int i = 1; i < argc; i++) {
+        std::filesystem::path p(argv[i]);
+        if (std::filesystem::is_directory(p)) {
+            for (const auto& entry : std::filesystem::directory_iterator(p)) {
+                if (entry.path().extension() == ".json") {
+                    files.push_back(entry.path().string());
+                }
+            }
+        } else {
+            files.push_back(argv[i]);
+        }
+    }
+
+    std::sort(files.begin(), files.end());
+
+    int total_files = 0;
+    int total_pass = 0;
+    int total_fail = 0;
+    int files_clean = 0;
+    int files_with_failures = 0;
+
+    for (const auto& f : files) {
+        TestResult r = run_test_file(f);
+        total_files++;
+        total_pass += r.passed;
+        total_fail += r.failed;
+
+        if (r.failed == 0) {
+            files_clean++;
+            std::fprintf(stdout, "PASS  %s (%d/%d)\n",
+                         r.filename.c_str(), r.passed, r.total);
+        } else {
+            files_with_failures++;
+            std::fprintf(stdout, "FAIL  %s (%d/%d passed, %d failed)  %s\n",
+                         r.filename.c_str(), r.passed, r.total, r.failed,
+                         r.first_failure.c_str());
+        }
+    }
+
+    std::fprintf(stdout, "\n========================================\n");
+    std::fprintf(stdout, "Files: %d tested, %d clean, %d with failures\n",
+                 total_files, files_clean, files_with_failures);
+    std::fprintf(stdout, "Tests: %d total, %d passed, %d failed\n",
+                 total_pass + total_fail, total_pass, total_fail);
+    std::fprintf(stdout, "========================================\n");
+
+    return (total_fail == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+@
+
+\end{document}

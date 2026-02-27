@@ -1,0 +1,229 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Arcade Machine Emulator}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Introduction}
+
+This is a literate C++ implementation of an emulator for the Stern Electronics
+Berzerk arcade machine (1980). The emulator is built following the MAME emulator
+as a blueprint, faithfully reproducing the hardware architecture of the original
+machine.
+
+The Berzerk hardware consists of:
+\begin{itemize}
+\item A Zilog Z80 CPU running at 2.5~MHz
+\item 8~KB of video RAM with a bitmap display (256$\times$224 pixels, 16 colors)
+\item Two 74181 ALU chips for hardware-accelerated graphics operations (Magic RAM)
+\item An S14001A speech synthesis chip for voice output
+\item An Exidy custom sound board using a 6840 timer for sound effects
+\item NVRAM for persistent high score storage
+\end{itemize}
+
+\section{Main Entry Point}
+
+The main function creates a [[BerzerkEmulator]], initializes SDL, and enters
+the emulation loop.  The emulator is now a concrete implementation of the
+[[BerzerkMachine]] interface, enabling cosimulation with a second
+implementation.
+
+<<main.cpp>>=
+#include "emulator.h"
+#include "video.h"
+#include "platform.h"
+#include <SDL.h>
+#include <cstdio>
+#include <cstdlib>
+
+<<main context>>
+<<frame callback>>
+
+int main(int argc, char* argv[])
+{
+    const char* rom_dir = "rom/berzerk";
+    if (argc > 1) {
+        rom_dir = argv[1];
+    }
+
+    std::fprintf(stdout, "Berzerk Emulator\n\n");
+
+    <<create emulator>>
+    <<run memory self test>>
+    <<initialize platform>>
+    <<enter emulation loop>>
+
+    platform_shutdown(ctx.handles);
+    return EXIT_SUCCESS;
+}
+@
+
+\subsection{Main Context}
+
+A lightweight struct for the main loop, holding the emulator and SDL handles.
+
+<<main context>>=
+struct MainContext {
+    BerzerkEmulator* emu;
+    PlatformHandles handles;
+    uint32_t palette[16];
+    bool running;
+};
+@
+
+\subsection{Frame Callback}
+
+Called once per frame.  It polls input, runs one frame of Z80 execution
+with interrupt timing, renders the VRAM to the RGBA framebuffer, and
+presents the result.
+
+<<frame callback>>=
+void frame_callback(MainContext& ctx)
+{
+    InputState input;
+    ctx.running = poll_input(input);
+    if (!ctx.running) return;
+
+    ctx.emu->set_input(input);
+    ctx.emu->step_frame();
+
+    render_frame(ctx.emu->memory().video, ctx.palette);
+    update_texture(ctx.handles.texture,
+                   ctx.emu->memory().video.framebuffer.data());
+    present_frame(ctx.handles.renderer, ctx.handles.texture);
+
+    int fc = ctx.emu->frame_count();
+    if (fc <= 10 || fc % 60 == 0) {
+        int vram_nonzero = 0;
+        const uint8_t* vram = ctx.emu->vram_data();
+        for (int i = 0; i < 0x2000; i++) {
+            if (vram[i] != 0) vram_nonzero++;
+        }
+        std::fprintf(stderr, "frame %d: PC=0x%04X SP=0x%04X "
+                     "AF=0x%04X BC=0x%04X DE=0x%04X HL=0x%04X "
+                     "IRQ=%d NMI=%d vram=%d "
+                     "magic_ctrl=0x%02X\n",
+                     fc,
+                     ctx.emu->cpu().get_pc(), ctx.emu->cpu().get_sp(),
+                     ctx.emu->cpu().get_af(), ctx.emu->cpu().get_bc(),
+                     ctx.emu->cpu().get_de(), ctx.emu->cpu().get_hl(),
+                     ctx.emu->memory().interrupts.irq_count,
+                     ctx.emu->memory().interrupts.nmi_count,
+                     vram_nonzero,
+                     ctx.emu->memory().video.magic.control);
+    }
+}
+@
+
+\subsection{Emulator Creation}
+
+Create the [[BerzerkEmulator]], load ROMs, and verify the memory map.
+
+<<create emulator>>=
+    BerzerkEmulator emu;
+    if (!emu.init(rom_dir)) {
+        std::fprintf(stderr, "Failed to initialize emulator. Check ROM path: %s\n", rom_dir);
+        return EXIT_FAILURE;
+    }
+    std::fprintf(stdout, "\n");
+@
+
+\subsection{Memory Self-Test}
+
+Verify that the memory map is wired correctly by testing reads and writes
+to each region type: ROM, mirrored RAM, VRAM, Magic RAM, and unmapped.
+
+<<run memory self test>>=
+    int failures = 0;
+
+    // ROM0 first byte
+    uint8_t rom0 = emu.memory().program.read(0x0000);
+    std::fprintf(stdout, "ROM0[0x0000] = 0x%02X\n", rom0);
+
+    // Work RAM write/read
+    emu.memory().program.write(0x0800, 0x42);
+    uint8_t ram_val = emu.memory().program.read(0x0800);
+    if (ram_val != 0x42) { failures++; }
+    std::fprintf(stdout, "WorkRAM write/read: 0x%02X %s\n",
+                 ram_val, ram_val == 0x42 ? "OK" : "FAIL");
+
+    // Work RAM mirror at 0x0C00
+    uint8_t mirror = emu.memory().program.read(0x0C00);
+    if (mirror != 0x42) { failures++; }
+    std::fprintf(stdout, "WorkRAM mirror:     0x%02X %s\n",
+                 mirror, mirror == 0x42 ? "OK" : "FAIL");
+
+    // VRAM write/read
+    emu.memory().program.write(0x4000, 0xAA);
+    uint8_t vram = emu.memory().program.read(0x4000);
+    if (vram != 0xAA) { failures++; }
+    std::fprintf(stdout, "VRAM write/read:    0x%02X %s\n",
+                 vram, vram == 0xAA ? "OK" : "FAIL");
+
+    // Magic RAM reads through to VRAM
+    uint8_t magic = emu.memory().program.read(0x6000);
+    if (magic != 0xAA) { failures++; }
+    std::fprintf(stdout, "MagicRAM -> VRAM:   0x%02X %s\n",
+                 magic, magic == 0xAA ? "OK" : "FAIL");
+
+    // Unpopulated ROM6 reads 0xFF
+    uint8_t rom6 = emu.memory().program.read(0x3800);
+    if (rom6 != 0xFF) { failures++; }
+    std::fprintf(stdout, "ROM6 empty:         0x%02X %s\n",
+                 rom6, rom6 == 0xFF ? "OK" : "FAIL");
+
+    // Unmapped high memory reads 0xFF
+    uint8_t unmapped = emu.memory().program.read(0xF000);
+    if (unmapped != 0xFF) { failures++; }
+    std::fprintf(stdout, "Unmapped high:      0x%02X %s\n",
+                 unmapped, unmapped == 0xFF ? "OK" : "FAIL");
+
+    std::fprintf(stdout, "\nMemory self-test: %s (%d failures)\n",
+                 failures == 0 ? "PASSED" : "FAILED", failures);
+    if (failures > 0) {
+        return EXIT_FAILURE;
+    }
+
+    MainContext ctx;
+    ctx.emu = &emu;
+    ctx.running = true;
+    init_palette(ctx.palette);
+
+    std::fprintf(stdout, "\nZ80 CPU initialized (PC=0x%04X, SP=0x%04X)\n",
+                 emu.cpu().get_pc(), emu.cpu().get_sp());
+@
+
+\subsection{Platform Initialization}
+
+Initialize the SDL window, renderer, and texture.  This creates a window
+scaled to 3x the native resolution (256$\times$224 visible pixels).
+
+<<initialize platform>>=
+    PlatformConfig pconfig;
+    if (!platform_init(pconfig, ctx.handles)) {
+        std::fprintf(stderr, "Platform initialization failed\n");
+        return EXIT_FAILURE;
+    }
+    std::fprintf(stdout, "SDL platform initialized (%dx%d window)\n",
+                 256 * pconfig.scale, 224 * pconfig.scale);
+@
+
+\subsection{Emulation Loop}
+
+A simple polling loop.  Vsync in the renderer handles frame pacing;
+[[SDL\_Delay(1)]] prevents 100\% CPU usage if vsync is unavailable.
+
+<<enter emulation loop>>=
+    while (ctx.running) {
+        frame_callback(ctx);
+        SDL_Delay(1);
+    }
+@
+
+\end{document}

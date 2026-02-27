@@ -1,0 +1,406 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Cosimulation Test Harness}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The cosimulation harness runs two [[BerzerkMachine]] implementations
+side by side, feeding identical input sequences, and comparing outputs
+at two levels:
+
+\begin{itemize}
+\item \textbf{Subroutine level:} For each matched subroutine invocation,
+  compare the unordered set of side effects.
+\item \textbf{Frame level:} Compare VRAM content at each frame boundary.
+\end{itemize}
+
+The harness also supports input recording and playback for deterministic
+replay, and trace capture for bidirectional debugging.
+
+\section{Header}
+
+<<cosim_harness.h>>=
+#ifndef BERZERK_COSIM_HARNESS_H
+#define BERZERK_COSIM_HARNESS_H
+
+#include "cosim.h"
+#include "platform.h"
+#include <vector>
+#include <string>
+
+<<input recording>>
+<<comparison result>>
+<<cosim runner>>
+
+#endif // BERZERK_COSIM_HARNESS_H
+@
+
+\section{Input Recording}
+
+A recorded input sequence is a vector of per-frame [[InputState]] values.
+This enables deterministic replay: both implementations receive identical
+inputs on each frame.
+
+<<input recording>>=
+struct InputRecording {
+    std::vector<InputState> frames;
+
+    void record_frame(const InputState& input) {
+        frames.push_back(input);
+    }
+
+    const InputState& get_frame(int frame_number) const {
+        if (frame_number >= 0 &&
+            frame_number < static_cast<int>(frames.size())) {
+            return frames[frame_number];
+        }
+        // Default: no buttons pressed
+        static const InputState default_input;
+        return default_input;
+    }
+
+    int num_frames() const {
+        return static_cast<int>(frames.size());
+    }
+};
+
+bool save_input_recording(const InputRecording& rec, const char* path);
+bool load_input_recording(InputRecording& rec, const char* path);
+@
+
+\section{Comparison Result}
+
+The result of comparing two [[FrameLog]] structures.
+
+<<comparison result>>=
+struct ComparisonResult {
+    bool match = true;                  // overall pass/fail
+    int first_divergent_frame = -1;     // frame where first difference found
+
+    // Subroutine-level divergences
+    int invocation_mismatches = 0;      // different invocation sequences
+    int event_set_mismatches = 0;       // same invocation, different events
+
+    // Frame-level divergences
+    int vram_byte_mismatches = 0;       // bytes that differ in final VRAM
+    int intercept_mismatches = 0;       // collision flag differences
+
+    // Statistics
+    int frames_compared = 0;
+    int total_invocations = 0;
+
+    void print_summary() const;
+};
+
+// Compare two frame logs.
+ComparisonResult compare_frame_logs(const FrameLog& a, const FrameLog& b);
+
+// Compare invocation sequences (ordered).
+bool compare_invocation_sequences(
+    const std::vector<InvocationRecord>& a,
+    const std::vector<InvocationRecord>& b,
+    int& first_mismatch_index);
+
+// Compare event sets within a single invocation (unordered).
+bool compare_event_sets(
+    const std::vector<EventRecord>& a,
+    const std::vector<EventRecord>& b);
+@
+
+\section{Cosimulation Runner}
+
+The runner orchestrates the side-by-side execution.
+
+<<cosim runner>>=
+class CosimRunner {
+public:
+    // Takes ownership of neither machine.
+    CosimRunner(BerzerkMachine& reference, BerzerkMachine& candidate);
+
+    // Run N frames, comparing at each frame boundary.
+    // Uses the provided input recording (or default inputs if null).
+    ComparisonResult run(int num_frames, const InputRecording* inputs = nullptr);
+
+    // Run with live input recording (for capturing test data).
+    ComparisonResult run_and_record(int num_frames,
+                                     InputRecording& recording,
+                                     const InputState& live_input);
+
+private:
+    BerzerkMachine& m_reference;
+    BerzerkMachine& m_candidate;
+};
+@
+
+\section{Implementation}
+
+<<cosim_harness.cpp>>=
+#include "cosim_harness.h"
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <algorithm>
+
+<<comparison implementation>>
+<<cosim runner implementation>>
+<<input recording io>>
+@
+
+\subsection{Frame Log Comparison}
+
+<<comparison implementation>>=
+ComparisonResult compare_frame_logs(const FrameLog& a, const FrameLog& b)
+{
+    ComparisonResult result;
+    result.frames_compared = 1;
+
+    // Compare invocation sequences (ordered)
+    int mismatch_idx = -1;
+    if (!compare_invocation_sequences(a.invocations, b.invocations,
+                                       mismatch_idx)) {
+        result.match = false;
+        result.invocation_mismatches++;
+        result.first_divergent_frame = a.frame_number;
+    }
+
+    // Compare event sets within matching invocations
+    size_t min_inv = std::min(a.invocations.size(), b.invocations.size());
+    result.total_invocations = static_cast<int>(min_inv);
+    for (size_t i = 0; i < min_inv; i++) {
+        if (a.invocations[i].address != b.invocations[i].address) break;
+        if (!compare_event_sets(a.invocations[i].events,
+                                b.invocations[i].events)) {
+            result.match = false;
+            result.event_set_mismatches++;
+            if (result.first_divergent_frame < 0) {
+                result.first_divergent_frame = a.frame_number;
+            }
+        }
+    }
+
+    // Compare VRAM
+    for (int i = 0; i < 0x2000; i++) {
+        if (a.final_vram[i] != b.final_vram[i]) {
+            result.vram_byte_mismatches++;
+            result.match = false;
+        }
+    }
+    if (result.vram_byte_mismatches > 0 && result.first_divergent_frame < 0) {
+        result.first_divergent_frame = a.frame_number;
+    }
+
+    // Compare intercept flag
+    if (a.final_intercept != b.final_intercept) {
+        result.intercept_mismatches++;
+        result.match = false;
+        if (result.first_divergent_frame < 0) {
+            result.first_divergent_frame = a.frame_number;
+        }
+    }
+
+    return result;
+}
+
+bool compare_invocation_sequences(
+    const std::vector<InvocationRecord>& a,
+    const std::vector<InvocationRecord>& b,
+    int& first_mismatch_index)
+{
+    first_mismatch_index = -1;
+    if (a.size() != b.size()) {
+        first_mismatch_index = static_cast<int>(std::min(a.size(), b.size()));
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].address != b[i].address ||
+            a[i].invocation_count != b[i].invocation_count ||
+            a[i].trigger != b[i].trigger) {
+            first_mismatch_index = static_cast<int>(i);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool compare_event_sets(
+    const std::vector<EventRecord>& a,
+    const std::vector<EventRecord>& b)
+{
+    if (a.size() != b.size()) return false;
+
+    // Sort copies for set comparison.
+    auto sort_key = [](const EventRecord& e) {
+        return (static_cast<uint64_t>(e.type) << 40) |
+               (static_cast<uint64_t>(e.region) << 32) |
+               (static_cast<uint64_t>(e.address) << 16) |
+               static_cast<uint64_t>(e.new_data);
+    };
+
+    std::vector<EventRecord> sa = a, sb = b;
+    std::sort(sa.begin(), sa.end(), [&](const EventRecord& x, const EventRecord& y) {
+        return sort_key(x) < sort_key(y);
+    });
+    std::sort(sb.begin(), sb.end(), [&](const EventRecord& x, const EventRecord& y) {
+        return sort_key(x) < sort_key(y);
+    });
+
+    return sa == sb;
+}
+
+void ComparisonResult::print_summary() const
+{
+    std::fprintf(stderr, "Cosimulation: %d frames compared, %s\n",
+                 frames_compared, match ? "PASS" : "FAIL");
+    if (!match) {
+        std::fprintf(stderr, "  First divergence at frame %d\n",
+                     first_divergent_frame);
+        if (invocation_mismatches > 0)
+            std::fprintf(stderr, "  Invocation sequence mismatches: %d\n",
+                         invocation_mismatches);
+        if (event_set_mismatches > 0)
+            std::fprintf(stderr, "  Event set mismatches: %d\n",
+                         event_set_mismatches);
+        if (vram_byte_mismatches > 0)
+            std::fprintf(stderr, "  VRAM byte mismatches: %d\n",
+                         vram_byte_mismatches);
+        if (intercept_mismatches > 0)
+            std::fprintf(stderr, "  Intercept flag mismatches: %d\n",
+                         intercept_mismatches);
+    }
+    std::fprintf(stderr, "  Total invocations compared: %d\n",
+                 total_invocations);
+}
+@
+
+\subsection{Cosimulation Runner}
+
+<<cosim runner implementation>>=
+CosimRunner::CosimRunner(BerzerkMachine& reference, BerzerkMachine& candidate)
+    : m_reference(reference)
+    , m_candidate(candidate)
+{
+}
+
+ComparisonResult CosimRunner::run(int num_frames, const InputRecording* inputs)
+{
+    ComparisonResult aggregate;
+    aggregate.frames_compared = 0;
+
+    m_reference.set_logging_enabled(true);
+    m_candidate.set_logging_enabled(true);
+
+    for (int f = 0; f < num_frames; f++) {
+        // Feed identical input to both machines.
+        InputState input;
+        if (inputs) {
+            input = inputs->get_frame(f);
+        }
+        m_reference.set_input(input);
+        m_candidate.set_input(input);
+
+        // Step both machines one frame.
+        m_reference.step_frame();
+        m_candidate.step_frame();
+
+        // Collect and compare frame logs.
+        FrameLog ref_log = m_reference.take_frame_log();
+        FrameLog cand_log = m_candidate.take_frame_log();
+
+        ComparisonResult frame_result = compare_frame_logs(ref_log, cand_log);
+
+        aggregate.frames_compared++;
+        aggregate.total_invocations += frame_result.total_invocations;
+        aggregate.invocation_mismatches += frame_result.invocation_mismatches;
+        aggregate.event_set_mismatches += frame_result.event_set_mismatches;
+        aggregate.vram_byte_mismatches += frame_result.vram_byte_mismatches;
+        aggregate.intercept_mismatches += frame_result.intercept_mismatches;
+
+        if (!frame_result.match) {
+            aggregate.match = false;
+            if (aggregate.first_divergent_frame < 0) {
+                aggregate.first_divergent_frame = f;
+            }
+        }
+    }
+
+    m_reference.set_logging_enabled(false);
+    m_candidate.set_logging_enabled(false);
+
+    return aggregate;
+}
+
+ComparisonResult CosimRunner::run_and_record(int num_frames,
+                                              InputRecording& recording,
+                                              const InputState& live_input)
+{
+    // Record the live input for this frame, then run.
+    recording.record_frame(live_input);
+    return run(num_frames, &recording);
+}
+@
+
+\subsection{Input Recording I/O}
+
+Binary format: 4-byte header (magic + frame count), then 3 bytes per
+frame (the three port bytes).
+
+<<input recording io>>=
+static constexpr uint32_t INPUT_MAGIC = 0x425A4B49;  // "BZKI"
+
+bool save_input_recording(const InputRecording& rec, const char* path)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+
+    uint32_t magic = INPUT_MAGIC;
+    uint32_t count = static_cast<uint32_t>(rec.frames.size());
+    file.write(reinterpret_cast<const char*>(&magic), 4);
+    file.write(reinterpret_cast<const char*>(&count), 4);
+
+    for (const auto& frame : rec.frames) {
+        file.put(static_cast<char>(frame.port_48));
+        file.put(static_cast<char>(frame.port_49));
+        file.put(static_cast<char>(frame.port_4a));
+    }
+
+    return file.good();
+}
+
+bool load_input_recording(InputRecording& rec, const char* path)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return false;
+
+    uint32_t magic = 0, count = 0;
+    file.read(reinterpret_cast<char*>(&magic), 4);
+    file.read(reinterpret_cast<char*>(&count), 4);
+
+    if (magic != INPUT_MAGIC) {
+        std::fprintf(stderr, "Invalid input recording magic: 0x%08X\n", magic);
+        return false;
+    }
+
+    rec.frames.clear();
+    rec.frames.reserve(count);
+
+    for (uint32_t i = 0; i < count; i++) {
+        InputState input;
+        input.port_48 = static_cast<uint8_t>(file.get());
+        input.port_49 = static_cast<uint8_t>(file.get());
+        input.port_4a = static_cast<uint8_t>(file.get());
+        rec.frames.push_back(input);
+    }
+
+    return file.good();
+}
+@
+
+\end{document}

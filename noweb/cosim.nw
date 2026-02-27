@@ -1,0 +1,311 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Cosimulation Infrastructure}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The cosimulation infrastructure enables verification of a second C++ Berzerk
+implementation against the Z80 emulator. Two levels of verification are
+supported:
+
+\begin{itemize}
+\item \textbf{Subroutine-level:} Side effects (memory writes, register changes)
+  at each subroutine invocation boundary must match as unordered sets.
+\item \textbf{Frame-level:} VRAM content and collision flags must match at
+  frame boundaries.
+\end{itemize}
+
+The system works by defining a common interface ([[BerzerkMachine]]) that both
+the emulator and any second implementation must satisfy, plus data types for
+capturing machine state snapshots and event logs.
+
+\section{Cosimulation Header}
+
+<<cosim.h>>=
+#ifndef BERZERK_COSIM_H
+#define BERZERK_COSIM_H
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
+#include <array>
+#include <unordered_map>
+
+<<event record types>>
+<<machine snapshot>>
+<<subroutine entry point set>>
+<<invocation record>>
+<<frame log>>
+<<berzerk machine interface>>
+
+#endif // BERZERK_COSIM_H
+@
+
+\section{Event Record Types (Phase 7.3)}
+
+An [[EventRecord]] captures a single observable side effect within a
+subroutine invocation. Events are compared as unordered sets: the C++
+reimplementation may produce the same writes in a different order within
+a subroutine.
+
+Each event records both old and new values to enable bidirectional trace
+debugging. The [[old\_data]]/[[old\_value]] fields are excluded from
+comparison -- they exist for replay, not for verification.
+
+<<event record types>>=
+enum class EventType : uint8_t {
+    MEMORY_WRITE,       // address, old_data, new_data
+    IO_WRITE,           // port address, old_data, new_data
+    COLLISION_CHANGE,   // intercept flag changed
+};
+
+enum class EventRegion : uint8_t {
+    WORK_RAM,
+    VRAM,
+    COLOR_RAM,
+    MAGIC_RAM,
+    IO_PORT,
+    OTHER,
+};
+
+struct EventRecord {
+    EventType type;
+    EventRegion region;
+    uint16_t address;
+    uint8_t old_data;
+    uint8_t new_data;
+
+    // Comparison ignores old_data (implementations may reach a subroutine
+    // via different intermediate states, but must produce the same writes).
+    bool operator==(const EventRecord& o) const {
+        return type == o.type &&
+               region == o.region &&
+               address == o.address &&
+               new_data == o.new_data;
+    }
+    bool operator!=(const EventRecord& o) const { return !(*this == o); }
+};
+@
+
+\section{Machine Snapshot (Phase 7.2)}
+
+A [[MachineSnapshot]] captures the full observable state of the machine at
+a point in time. It is used for state comparison at frame boundaries and
+for save/restore during debugging.
+
+<<machine snapshot>>=
+struct CpuSnapshot {
+    uint16_t af, bc, de, hl;
+    uint16_t af2, bc2, de2, hl2;
+    uint16_t ix, iy, sp, pc, wz;
+    uint8_t i, r, iff1, iff2, im;
+    bool halted;
+
+    bool operator==(const CpuSnapshot& o) const {
+        return af == o.af && bc == o.bc && de == o.de && hl == o.hl &&
+               af2 == o.af2 && bc2 == o.bc2 && de2 == o.de2 && hl2 == o.hl2 &&
+               ix == o.ix && iy == o.iy && sp == o.sp && pc == o.pc &&
+               i == o.i && r == o.r && iff1 == o.iff1 && iff2 == o.iff2 &&
+               im == o.im && halted == o.halted;
+    }
+    bool operator!=(const CpuSnapshot& o) const { return !(*this == o); }
+};
+
+struct MachineSnapshot {
+    CpuSnapshot cpu;
+    std::array<uint8_t, 0x0400> work_ram;
+    std::array<uint8_t, 0x2000> vram;
+    std::array<uint8_t, 0x0800> color_ram;
+    uint8_t magic_control;
+    uint8_t magic_intercept;
+    bool nmi_enabled;
+    bool irq_enabled;
+    int frame_number;
+
+    bool operator==(const MachineSnapshot& o) const {
+        return cpu == o.cpu &&
+               work_ram == o.work_ram &&
+               vram == o.vram &&
+               color_ram == o.color_ram &&
+               magic_control == o.magic_control &&
+               magic_intercept == o.magic_intercept &&
+               nmi_enabled == o.nmi_enabled &&
+               irq_enabled == o.irq_enabled;
+    }
+    bool operator!=(const MachineSnapshot& o) const { return !(*this == o); }
+};
+@
+
+\section{Subroutine Entry Point Set (Phase 7.4)}
+
+The set of known subroutine entry points from Phase 6 static analysis.
+A subroutine invocation is detected whenever the Z80 program counter
+matches one of these addresses, regardless of how control arrived there
+(CALL, JP, RST, fall-through).
+
+<<subroutine entry point set>>=
+struct SubroutineEntryPoints {
+    // Lookup table: entry_points[addr] = true if addr is an entry point.
+    // Using a flat array for O(1) lookup at the cost of 16KB.
+    std::array<bool, 0x4000> is_entry;
+    int count = 0;
+
+    SubroutineEntryPoints() {
+        is_entry.fill(false);
+    }
+
+    void add(uint16_t addr) {
+        if (addr < 0x4000 && !is_entry[addr]) {
+            is_entry[addr] = true;
+            count++;
+        }
+    }
+
+    bool check(uint16_t addr) const {
+        return addr < 0x4000 && is_entry[addr];
+    }
+};
+
+// Load entry points from the subroutine_entry_points.txt file.
+bool load_entry_points(const char* path, SubroutineEntryPoints& ep);
+@
+
+\section{Invocation Record}
+
+Each subroutine invocation is identified by (address, invocation count,
+trigger type). Events within the invocation are collected as a vector
+(compared as unordered sets).
+
+<<invocation record>>=
+enum class TriggerType : uint8_t {
+    CONVENTIONAL,   // CALL, JP, RST, fall-through
+    INTERRUPT,      // NMI or IRQ fired
+};
+
+struct InvocationRecord {
+    uint16_t address;           // subroutine entry point
+    uint32_t invocation_count;  // Nth call to this address
+    TriggerType trigger;
+    uint16_t stack_depth;       // SP at entry (proxy for call depth)
+    std::vector<EventRecord> events;
+};
+@
+
+\section{Frame Log}
+
+A [[FrameLog]] collects all invocation records and the final VRAM state
+for one frame. Comparison between two implementations operates on this
+structure.
+
+<<frame log>>=
+struct FrameLog {
+    int frame_number;
+    std::vector<InvocationRecord> invocations;
+
+    // Final VRAM state at frame boundary for pixel-level comparison.
+    std::array<uint8_t, 0x2000> final_vram;
+
+    // Final collision flag at frame boundary.
+    uint8_t final_intercept;
+};
+@
+
+\section{BerzerkMachine Interface (Phase 7.1)}
+
+The abstract interface that both the emulator and any second implementation
+must satisfy. Sound is deferred to a later iteration.
+
+<<berzerk machine interface>>=
+struct InputState;  // forward declaration from platform.h
+
+class BerzerkMachine {
+public:
+    virtual ~BerzerkMachine() = default;
+
+    // Lifecycle
+    virtual bool init(const char* rom_dir) = 0;
+    virtual void reset() = 0;
+
+    // Execution
+    virtual void step_frame() = 0;
+    virtual void step_instruction() {}  // default no-op; only emulator implements
+
+    // State
+    virtual MachineSnapshot snapshot() const = 0;
+    virtual void restore(const MachineSnapshot& snap) = 0;
+
+    // Output
+    virtual const uint8_t* vram_data() const = 0;
+
+    // Input
+    virtual void set_input(const InputState& input) = 0;
+
+    // Event logging (no-op by default; emulator overrides)
+    virtual void set_logging_enabled(bool /*enabled*/) {}
+    virtual FrameLog take_frame_log() { return {}; }
+
+    // Frame counter
+    virtual int frame_count() const = 0;
+};
+@
+
+\section{Implementation}
+
+<<cosim.cpp>>=
+#include "cosim.h"
+#include <cstdio>
+#include <fstream>
+#include <string>
+#include <sstream>
+
+<<load entry points implementation>>
+@
+
+\subsection{Load Entry Points}
+
+Parse the [[subroutine\_entry\_points.txt]] file, extracting hex addresses.
+Lines starting with [[;]] are comments. Each data line has a hex address
+as the first token.
+
+<<load entry points implementation>>=
+bool load_entry_points(const char* path, SubroutineEntryPoints& ep)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::fprintf(stderr, "Cannot open entry points file: %s\n", path);
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == ';') continue;
+
+        // Parse hex address (first token)
+        uint32_t addr = 0;
+        std::istringstream iss(line);
+        std::string token;
+        if (iss >> token) {
+            if (std::sscanf(token.c_str(), "0x%x", &addr) == 1 ||
+                std::sscanf(token.c_str(), "$%x", &addr) == 1 ||
+                std::sscanf(token.c_str(), "%x", &addr) == 1) {
+                ep.add(static_cast<uint16_t>(addr));
+            }
+        }
+    }
+
+    std::fprintf(stderr, "Loaded %d subroutine entry points from %s\n",
+                 ep.count, path);
+    return ep.count > 0;
+}
+@
+
+\end{document}

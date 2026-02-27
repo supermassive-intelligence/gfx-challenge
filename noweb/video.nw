@@ -1,0 +1,343 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Video Subsystem}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The Berzerk video subsystem comprises three interrelated pieces of hardware:
+
+\begin{itemize}
+\item \textbf{Video RAM} (8~KB): a bitmap framebuffer at 0x4000--0x5FFF, 32~bytes
+  per scanline, one bit per pixel, 256$\times$256 pixels (224 visible lines).
+\item \textbf{Color RAM} (2~KB): per-cell color attributes at 0x8000--0x87FF.  Each
+  byte covers 8 pixels (same span as one VRAM byte), split into two 4-pixel
+  nibbles.
+\item \textbf{Magic RAM} (0x6000--0x7FFF): not separate memory.  Writes pass through
+  two 74181 4-bit ALU chips that shift, combine, and collision-detect sprite
+  data against existing VRAM content.  Reads pass through to underlying VRAM.
+\end{itemize}
+
+The MAME source \texttt{berzerk.cpp} is the authoritative reference for all
+behavior in this module.  The mode line of both 74181 ALUs is permanently
+tied high (Logic mode, M=1) via a call to [[mode\_w(1)]] at video start.
+This means only the 16 Boolean functions are available; arithmetic carry is
+never used.
+
+\section{Header}
+
+<<video.h>>=
+#ifndef BERZERK_VIDEO_H
+#define BERZERK_VIDEO_H
+
+#include <cstdint>
+#include <array>
+
+<<magic ram control struct>>
+<<video state struct>>
+<<palette declaration>>
+<<render frame declaration>>
+<<magic ram write declaration>>
+<<read intercept declaration>>
+
+#endif // BERZERK_VIDEO_H
+@
+
+\section{Data Structures}
+
+\subsection{Magic RAM Control}
+
+The control byte written to I/O port 0x4B configures the 74181 ALU
+select lines (bits 7--4), the mirror flag (bit 3), and the shift count
+(bits 2--0).  The [[last\_shift\_data]] field latches the low 7~bits of
+the most recent Magic RAM write for the two-byte shift register.  The
+[[intercept]] flag is a one-way latch: it starts at 1 (no collision) and
+clears to 0 when any Magic RAM write finds overlapping set bits between
+the shifted sprite data and existing VRAM content.
+
+<<magic ram control struct>>=
+struct MagicRAMControl {
+    uint8_t control = 0;       // port 0x4B value
+    uint8_t last_shift_data = 0;
+    uint8_t intercept = 1;     // 1=no collision, 0=collision detected
+};
+@
+
+\subsection{Video State}
+
+All video-related state is collected here so it can be owned by
+[[BerzerkMemory]] and inspected during testing or cosimulation.
+
+The [[vram]] and [[color\_ram]] arrays are the backing store for the
+program-space regions 0x4000--0x5FFF and 0x8000--0x87FF.
+
+The [[framebuffer]] holds the rendered RGBA output for one frame.  It is
+256$\times$256 pixels even though only 224 scanlines are visible.  Lines
+0x00--0x1F correspond to the vblank region and are always black.
+
+The [[v256]] flag tracks whether the beam is in the vblank region.  The
+game reads it via port 0x4E.
+
+<<video state struct>>=
+struct VideoState {
+    std::array<uint8_t, 0x2000> vram;
+    std::array<uint8_t, 0x0800> color_ram;
+    MagicRAMControl magic;
+    bool v256 = false;
+    std::array<uint32_t, 256 * 256> framebuffer;
+
+    VideoState() {
+        vram.fill(0);
+        color_ram.fill(0);
+        framebuffer.fill(0);
+    }
+};
+@
+
+\section{Palette}
+
+16 colors from 4 bits: R (bit 0), G (bit 1), B (bit 2), I (bit 3).
+When the intensity bit is clear, the base values are attenuated.  We
+use the standard resistor-network approximation (intensity adds 0x55 to
+each active channel, base is 0xAA).  Color 0 is always black.
+
+RGBA is packed as 0xRRGGBBAA (A=0xFF) in big-endian uint32\_t.  This is
+arbitrary since SDL will reinterpret it at blit time, and we are not
+adding SDL in this phase.
+
+<<palette declaration>>=
+void init_palette(uint32_t palette[16]);
+@
+
+\section{Frame Rendering}
+
+The [[render\_frame]] function converts VRAM + Color RAM into an RGBA
+framebuffer.  The algorithm follows MAME's [[screen\_update]] exactly:
+iterate over every byte in VRAM, fetch the color byte, and produce 8
+pixels per iteration.  The left 4 pixels use the high nibble color, the
+right 4 pixels use the low nibble color.
+
+<<render frame declaration>>=
+void render_frame(VideoState& video, const uint32_t palette[16]);
+@
+
+\section{Magic RAM Write}
+
+Writing to program addresses 0x6000--0x7FFF triggers the Magic RAM
+pipeline: shift register, optional bit reversal, collision detection,
+74181 ALU combine, active-low inversion, and VRAM store.
+
+The [[offset]] parameter is relative to VRAM base (0x0000--0x1FFF).
+
+<<magic ram write declaration>>=
+void magic_ram_write(VideoState& video, uint16_t offset, uint8_t data);
+@
+
+\section{Read Intercept}
+
+Reading port 0x4E returns the collision status in bit 7 and the V256
+flag in bit 0.  The intercept flip-flop is inverted: a value of 0x80
+in bit 7 means collision was detected.
+
+<<read intercept declaration>>=
+uint8_t read_intercept(const VideoState& video);
+@
+
+\section{Implementation}
+
+<<video.cpp>>=
+#include "video.h"
+#include <cstring>
+
+<<bitswap8 helper>>
+<<ttl74181 logic helper>>
+<<init palette implementation>>
+<<render frame implementation>>
+<<magic ram write implementation>>
+<<read intercept implementation>>
+@
+
+\subsection{Bit Reversal Helper}
+
+The mirror flag (bit 3 of the control byte) reverses the 8 bits of the
+shift output.  This is a standard parallel bit-swap.
+
+<<bitswap8 helper>>=
+static uint8_t bitswap8(uint8_t v)
+{
+    v = ((v & 0xF0) @>> 4) | ((v & 0x0F) @<< 4);
+    v = ((v & 0xCC) @>> 2) | ((v & 0x33) @<< 2);
+    v = ((v & 0xAA) @>> 1) | ((v & 0x55) @<< 1);
+    return v;
+}
+@
+
+\subsection{74181 ALU Logic Mode}
+
+The 74181 in logic mode (M=1) computes a purely combinational function
+of two 4-bit inputs A and B, controlled by select lines S3--S0.  The
+carry chain is disabled.
+
+The gate-level equations from the 74181 datasheet define intermediate
+terms P and G for each bit.  With M=1, the output for each bit is
+simply [[$\overline{P} \cdot G$]] (the carry terms vanish).
+
+We implement this as a 4-bit function matching MAME's [[74181.cpp]]
+[[update()]] path with [[m\_m = 1]].
+
+<<ttl74181 logic helper>>=
+static uint8_t ttl74181_logic(uint8_t a, uint8_t b, uint8_t s)
+{
+    uint8_t f = 0;
+    int s0 = (s @>> 0) & 1;
+    int s1 = (s @>> 1) & 1;
+    int s2 = (s @>> 2) & 1;
+    int s3 = (s @>> 3) & 1;
+
+    for (int i = 0; i < 4; i++) {
+        int ai = (a @>> i) & 1;
+        int bi = (b @>> i) & 1;
+
+        // P and G intermediate terms from 74181 gate equations
+        int p = !( ai | (bi & s0) | (s1 & (!bi)) );
+        int g = !( ((!bi) & s2 & ai) | (ai & bi & s3) );
+
+        // Logic mode (M=1, mp=0): carry term !(Cn & mp) = 1
+        // Full equation: fi = 1 XOR ((!p) & g)
+        int fi = 1 ^ ((!p) & g);
+        f |= (fi @<< i);
+    }
+    return f & 0x0F;
+}
+@
+
+\subsection{Palette Initialization}
+
+<<init palette implementation>>=
+void init_palette(uint32_t palette[16])
+{
+    for (int i = 0; i < 16; i++) {
+        if (i == 0) {
+            palette[i] = 0x000000FF;  // black, full alpha
+            continue;
+        }
+        uint8_t r = (i & 1) ? ((i & 8) ? 0xFF : 0xAA) : 0x00;
+        uint8_t g = (i & 2) ? ((i & 8) ? 0xFF : 0xAA) : 0x00;
+        uint8_t b = (i & 4) ? ((i & 8) ? 0xFF : 0xAA) : 0x00;
+        palette[i] = (static_cast<uint32_t>(r) @<< 24) |
+                     (static_cast<uint32_t>(g) @<< 16) |
+                     (static_cast<uint32_t>(b) @<< 8)  |
+                     0xFF;
+    }
+}
+@
+
+\subsection{Frame Rendering}
+
+This follows MAME's [[screen\_update\_berzerk]] exactly.  For each byte
+in VRAM, we fetch the corresponding color byte from Color RAM, then
+produce 8 pixels: the first 4 use the high nibble color, the last 4 use
+the low nibble color.  A set VRAM bit produces the color; a clear bit
+produces black.
+
+<<render frame implementation>>=
+void render_frame(VideoState& video, const uint32_t palette[16])
+{
+    for (int offset = 0; offset < 0x2000; offset++) {
+        uint8_t data = video.vram[offset];
+        uint8_t color = video.color_ram[
+            ((offset @>> 2) & 0x07E0) | (offset & 0x001F)
+        ];
+
+        int y = offset @>> 5;
+        int x = (offset & 0x1F) @<< 3;
+
+        // Left 4 pixels use high nibble color
+        uint8_t left_color = color @>> 4;
+        for (int i = 0; i < 4; i++) {
+            uint32_t pixel = (data & 0x80) ? palette[left_color] : palette[0];
+            video.framebuffer[y * 256 + x] = pixel;
+            x++;
+            data @<<= 1;
+        }
+
+        // Right 4 pixels use low nibble color
+        uint8_t right_color = color & 0x0F;
+        for (int i = 0; i < 4; i++) {
+            uint32_t pixel = (data & 0x80) ? palette[right_color] : palette[0];
+            video.framebuffer[y * 256 + x] = pixel;
+            x++;
+            data @<<= 1;
+        }
+    }
+}
+@
+
+\subsection{Magic RAM Write}
+
+This implements the full pipeline described in the Overview: shift
+register, optional mirror, collision detection, 74181 ALU combine with
+active-low inversion, and VRAM store.
+
+<<magic ram write implementation>>=
+void magic_ram_write(VideoState& video, uint16_t offset, uint8_t data)
+{
+    if (offset >= 0x2000) return;
+
+    uint8_t current_video_data = video.vram[offset];
+
+    // Step 1: Shift register -- combine previous and current bytes
+    uint16_t combined = (static_cast<uint16_t>(video.magic.last_shift_data) @<< 8) | data;
+    uint8_t shift_count = video.magic.control & 0x07;
+    uint8_t shift_output = static_cast<uint8_t>(combined @>> shift_count);
+
+    // Step 2: Optional bit reversal (mirror flag = bit 3)
+    if (video.magic.control & 0x08) {
+        shift_output = bitswap8(shift_output);
+    }
+
+    // Step 3: Collision detection (one-way latch)
+    if (shift_output & current_video_data) {
+        video.magic.intercept = 0;
+    }
+
+    // Step 4: 74181 ALU in Logic mode (M=1)
+    uint8_t s = (video.magic.control @>> 4) & 0x0F;
+    uint8_t alu_lo = ttl74181_logic(shift_output & 0x0F,
+                                     current_video_data & 0x0F, s);
+    uint8_t alu_hi = ttl74181_logic((shift_output @>> 4) & 0x0F,
+                                     (current_video_data @>> 4) & 0x0F, s);
+    uint8_t alu_output = (alu_hi @<< 4) | alu_lo;
+
+    // Step 5: Active-low inversion and store
+    video.vram[offset] = alu_output ^ 0xFF;
+
+    // Step 6: Latch low 7 bits for next write's shift register
+    video.magic.last_shift_data = data & 0x7F;
+}
+@
+
+\subsection{Read Intercept}
+
+Port 0x4E returns collision status (bit 7) and V256 (bit 0).
+
+The intercept flip-flop is inverted: when [[intercept]] is 0 (collision
+detected), the returned bit 7 is 1 (0x80).  When [[intercept]] is 1
+(no collision), bit 7 is 0.
+
+<<read intercept implementation>>=
+uint8_t read_intercept(const VideoState& video)
+{
+    uint8_t v256 = video.v256 ? 1 : 0;
+    return ((video.magic.intercept ^ 1) @<< 7) | v256;
+}
+@
+
+\end{document}
