@@ -1,0 +1,2977 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Z80 CPU}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The Zilog Z80 is the main processor in the Berzerk arcade machine, running at
+2.5~MHz. This module implements the full Z80 instruction set following MAME's
+emulator as the authoritative reference.
+
+Key design decisions:
+\begin{itemize}
+\item Register pairs use [[PAIR16]] unions for dual 8/16-bit access
+\item Flags stored as a composed byte with lookup tables for common patterns
+\item All memory access goes through [[AddressSpace]] callbacks
+\item The WZ (MEMPTR) internal register is tracked for undocumented flag behavior
+\item Cycle counting uses per-instruction T-state costs
+\end{itemize}
+
+\section{Header}
+
+<<z80.h>>=
+#ifndef BERZERK_Z80_H
+#define BERZERK_Z80_H
+
+#include "memory.h"
+#include <cstdint>
+
+<<pair16 type>>
+<<flag constants>>
+<<z80 class declaration>>
+
+#endif // BERZERK_Z80_H
+@
+
+\subsection{Register Pair Type}
+
+The Z80's 8-bit registers are grouped into 16-bit pairs (BC, DE, HL, etc.).
+MAME uses a union to allow access as either a 16-bit word or two 8-bit halves.
+On little-endian machines (x86, ARM), the low byte comes first in memory.
+
+<<pair16 type>>=
+union PAIR16 {
+    uint16_t w;
+    struct {
+        uint8_t l;  // low byte  (C, E, L, F)
+        uint8_t h;  // high byte (B, D, H, A)
+    } b;
+};
+@
+
+\subsection{Flag Constants}
+
+The Z80 flag register (F) encodes eight flags in a single byte. Bits 5 and 3
+are the undocumented Y and X flags, which copy bits 5 and 3 of the result
+for most ALU operations.
+
+<<flag constants>>=
+enum Z80Flag : uint8_t {
+    CF = 0x01,  // Carry
+    NF = 0x02,  // Subtract
+    PF = 0x04,  // Parity/Overflow (shared bit)
+    VF = 0x04,  // Overflow (alias for PF)
+    XF = 0x08,  // Undocumented bit 3
+    HF = 0x10,  // Half-carry
+    YF = 0x20,  // Undocumented bit 5
+    ZF = 0x40,  // Zero
+    SF = 0x80,  // Sign
+};
+@
+
+\subsection{Z80 Class}
+
+The class holds all CPU state and provides the public interface for the
+emulator: [[reset]], [[execute]], [[irq]], and [[nmi]].
+
+<<z80 class declaration>>=
+class Z80 {
+public:
+    Z80(AddressSpace& program_space, AddressSpace& io_space);
+
+    void reset();
+    int execute(int cycles_to_run);
+    int step();  // Execute exactly one instruction, return T-states consumed
+    void irq(uint8_t vector);
+    void nmi();
+
+    // State access for testing and debugging
+    uint16_t get_pc() const { return m_pc.w; }
+    uint16_t get_sp() const { return m_sp.w; }
+    uint16_t get_af() const { return m_af.w; }
+    uint16_t get_bc() const { return m_bc.w; }
+    uint16_t get_de() const { return m_de.w; }
+    uint16_t get_hl() const { return m_hl.w; }
+    uint16_t get_ix() const { return m_ix.w; }
+    uint16_t get_iy() const { return m_iy.w; }
+    uint16_t get_wz() const { return m_wz.w; }
+    uint16_t get_af2() const { return m_af2.w; }
+    uint16_t get_bc2() const { return m_bc2.w; }
+    uint16_t get_de2() const { return m_de2.w; }
+    uint16_t get_hl2() const { return m_hl2.w; }
+    uint8_t get_i() const { return m_i; }
+    uint8_t get_r() const { return m_r; }
+    uint8_t get_iff1() const { return m_iff1; }
+    uint8_t get_iff2() const { return m_iff2; }
+    uint8_t get_im() const { return m_im; }
+    bool get_halted() const { return m_halted; }
+
+    void set_pc(uint16_t v) { m_pc.w = v; }
+    void set_sp(uint16_t v) { m_sp.w = v; }
+    void set_af(uint16_t v) { m_af.w = v; }
+    void set_bc(uint16_t v) { m_bc.w = v; }
+    void set_de(uint16_t v) { m_de.w = v; }
+    void set_hl(uint16_t v) { m_hl.w = v; }
+    void set_ix(uint16_t v) { m_ix.w = v; }
+    void set_iy(uint16_t v) { m_iy.w = v; }
+    void set_wz(uint16_t v) { m_wz.w = v; }
+    void set_af2(uint16_t v) { m_af2.w = v; }
+    void set_bc2(uint16_t v) { m_bc2.w = v; }
+    void set_de2(uint16_t v) { m_de2.w = v; }
+    void set_hl2(uint16_t v) { m_hl2.w = v; }
+    void set_i(uint8_t v) { m_i = v; }
+    void set_r(uint8_t v) { m_r = v; }
+    void set_iff1(uint8_t v) { m_iff1 = v; }
+    void set_iff2(uint8_t v) { m_iff2 = v; }
+    void set_im(uint8_t v) { m_im = v; }
+    void set_halted(bool v) { m_halted = v; }
+    uint8_t get_q() const { return m_q; }
+    void set_q(uint8_t v) { m_q = v; }
+
+    int cycles_consumed() const { return m_cycles_consumed; }
+
+private:
+    // Memory interface
+    AddressSpace& m_program;
+    AddressSpace& m_io;
+
+    // Main register set
+    PAIR16 m_af, m_bc, m_de, m_hl;
+    // Shadow register set
+    PAIR16 m_af2, m_bc2, m_de2, m_hl2;
+    // Index registers
+    PAIR16 m_ix, m_iy;
+    // Special registers
+    PAIR16 m_sp, m_pc, m_wz;
+    uint8_t m_i;     // Interrupt vector base
+    uint8_t m_r;     // Refresh counter (7-bit + bit 7 preserved)
+
+    // Interrupt state
+    uint8_t m_iff1;  // Interrupt flip-flop 1
+    uint8_t m_iff2;  // Interrupt flip-flop 2
+    uint8_t m_im;    // Interrupt mode (0, 1, or 2)
+    bool m_halted;
+    bool m_irq_pending;
+    uint8_t m_irq_vector;
+    bool m_nmi_pending;
+    bool m_ei_pending; // EI delays enabling by one instruction
+
+    // Q register: tracks last flags value for SCF/CCF undocumented behavior
+    uint8_t m_q;
+    uint8_t m_prev_q;  // Q from previous instruction, saved at instruction start
+
+    // Cycle tracking
+    int m_cycles_remaining;
+    int m_cycles_consumed;
+
+    // Memory access helpers
+    uint8_t mem_read(uint16_t addr);
+    void mem_write(uint16_t addr, uint8_t data);
+    uint8_t io_read(uint16_t addr);
+    void io_write(uint16_t addr, uint8_t data);
+    uint8_t fetch();
+    uint16_t fetch16();
+
+    // Register access by index (for decoded opcode blocks)
+    uint8_t read_r8(int idx);
+    void write_r8(int idx, uint8_t val);
+    uint16_t& reg16_sp(int idx);   // BC, DE, HL, SP
+    uint16_t& reg16_af(int idx);   // BC, DE, HL, AF
+    bool test_cc(int cc);
+
+    // Cycle accounting
+    void eat(int t_states);
+
+    // ALU operations (set flags, return result)
+    void alu_add(uint8_t val);
+    void alu_adc(uint8_t val);
+    void alu_sub(uint8_t val);
+    void alu_sbc(uint8_t val);
+    void alu_and(uint8_t val);
+    void alu_xor(uint8_t val);
+    void alu_or(uint8_t val);
+    void alu_cp(uint8_t val);
+    uint8_t alu_inc(uint8_t val);
+    uint8_t alu_dec(uint8_t val);
+    void alu_add16(PAIR16& dst, uint16_t val);
+    void alu_adc16(uint16_t val);
+    void alu_sbc16(uint16_t val);
+
+    // Opcode dispatch
+    void execute_opcode(uint8_t opcode);
+    void execute_cb();
+    void execute_ed();
+    void execute_dd();
+    void execute_fd();
+    void execute_ddcb();
+    void execute_fdcb();
+    void execute_index(PAIR16& idx);
+    void execute_index_cb(PAIR16& idx);
+
+    // Interrupt handling
+    void handle_interrupts();
+};
+@
+
+\section{Implementation}
+
+<<z80.cpp>>=
+#include "z80.h"
+#include <cstdio>
+#include <cstring>
+
+<<flag lookup tables>>
+<<z80 constructor and reset>>
+<<z80 memory access>>
+<<z80 register decode>>
+<<z80 cycle accounting>>
+<<z80 alu operations>>
+<<z80 execute loop>>
+<<z80 unprefixed opcodes>>
+<<z80 cb prefix>>
+<<z80 ed prefix>>
+<<z80 dd fd prefix>>
+<<z80 interrupt handling>>
+@
+
+\subsection{Flag Lookup Tables}
+
+Pre-computed tables for Sign, Zero, Parity, and the undocumented Y/X flags.
+The [[sz53]] table provides S, Z, Y, and X flags for any 8-bit result.
+The [[szp]] table adds the parity flag.
+
+Parity is even parity: set when the number of 1-bits is even.
+
+Half-carry and overflow tables encode the truth tables for these flags
+based on the signs (bit 7 or bit 3) of the operands and result.
+
+<<flag lookup tables>>=
+static uint8_t sz53_table[256];
+static uint8_t parity_table[256];
+static uint8_t szp_table[256];
+
+static const uint8_t halfcarry_add[] = { 0, HF, HF, HF, 0, 0, 0, HF };
+static const uint8_t halfcarry_sub[] = { 0, 0, HF, 0, HF, 0, HF, HF };
+static const uint8_t overflow_add[]  = { 0, 0, 0, VF, VF, 0, 0, 0 };
+static const uint8_t overflow_sub[]  = { 0, VF, 0, 0, 0, 0, VF, 0 };
+
+static bool tables_initialized = false;
+
+static void init_tables()
+{
+    if (tables_initialized) return;
+
+    for (int i = 0; i < 256; i++) {
+        uint8_t sf = i & SF;
+        uint8_t zf = (i == 0) ? ZF : 0;
+        uint8_t yxf = i & (YF | XF);
+        sz53_table[i] = sf | zf | yxf;
+
+        // Even parity: count 1-bits
+        int bits = 0;
+        uint8_t v = i;
+        while (v) { bits += v & 1; v >>= 1; }
+        parity_table[i] = (bits & 1) ? 0 : PF;
+
+        szp_table[i] = sz53_table[i] | parity_table[i];
+    }
+
+    tables_initialized = true;
+}
+@
+
+\subsection{Constructor and Reset}
+
+<<z80 constructor and reset>>=
+Z80::Z80(AddressSpace& program_space, AddressSpace& io_space)
+    : m_program(program_space)
+    , m_io(io_space)
+{
+    init_tables();
+    reset();
+}
+
+void Z80::reset()
+{
+    m_af.w = 0xFFFF;
+    m_bc.w = 0x0000;
+    m_de.w = 0x0000;
+    m_hl.w = 0x0000;
+    m_af2.w = 0x0000;
+    m_bc2.w = 0x0000;
+    m_de2.w = 0x0000;
+    m_hl2.w = 0x0000;
+    m_ix.w = 0x0000;
+    m_iy.w = 0x0000;
+    m_sp.w = 0xFFFF;
+    m_pc.w = 0x0000;
+    m_wz.w = 0x0000;
+    m_i = 0;
+    m_r = 0;
+    m_iff1 = 0;
+    m_iff2 = 0;
+    m_im = 0;
+    m_halted = false;
+    m_irq_pending = false;
+    m_irq_vector = 0;
+    m_nmi_pending = false;
+    m_ei_pending = false;
+    m_q = 0;
+    m_prev_q = 0;
+    m_cycles_remaining = 0;
+    m_cycles_consumed = 0;
+}
+@
+
+\subsection{Memory Access}
+
+All memory reads and writes go through the [[AddressSpace]] callbacks.
+The [[fetch]] function reads a byte at PC and increments PC. The [[fetch16]]
+function reads a 16-bit little-endian value (low byte first).
+
+<<z80 memory access>>=
+uint8_t Z80::mem_read(uint16_t addr)
+{
+    return m_program.read(addr);
+}
+
+void Z80::mem_write(uint16_t addr, uint8_t data)
+{
+    m_program.write(addr, data);
+}
+
+uint8_t Z80::io_read(uint16_t addr)
+{
+    return m_io.read(addr & 0xFF);
+}
+
+void Z80::io_write(uint16_t addr, uint8_t data)
+{
+    m_io.write(addr & 0xFF, data);
+}
+
+uint8_t Z80::fetch()
+{
+    uint8_t val = mem_read(m_pc.w);
+    m_pc.w++;
+    return val;
+}
+
+uint16_t Z80::fetch16()
+{
+    uint8_t lo = fetch();
+    uint8_t hi = fetch();
+    return (hi << 8) | lo;
+}
+@
+
+\subsection{Register Decode}
+
+Many Z80 opcodes encode register indices in bits 5--3 or 2--0 of the opcode.
+The mapping is: B=0, C=1, D=2, E=3, H=4, L=5, (HL)=6, A=7.
+
+For 16-bit register pairs, two encodings exist:
+\begin{itemize}
+\item SP variant (arithmetic): BC=0, DE=1, HL=2, SP=3
+\item AF variant (push/pop): BC=0, DE=1, HL=2, AF=3
+\end{itemize}
+
+<<z80 register decode>>=
+uint8_t Z80::read_r8(int idx)
+{
+    switch (idx & 7) {
+        case 0: return m_bc.b.h;
+        case 1: return m_bc.b.l;
+        case 2: return m_de.b.h;
+        case 3: return m_de.b.l;
+        case 4: return m_hl.b.h;
+        case 5: return m_hl.b.l;
+        case 6: return mem_read(m_hl.w);
+        case 7: return m_af.b.h;
+    }
+    return 0xFF; // unreachable
+}
+
+void Z80::write_r8(int idx, uint8_t val)
+{
+    switch (idx & 7) {
+        case 0: m_bc.b.h = val; break;
+        case 1: m_bc.b.l = val; break;
+        case 2: m_de.b.h = val; break;
+        case 3: m_de.b.l = val; break;
+        case 4: m_hl.b.h = val; break;
+        case 5: m_hl.b.l = val; break;
+        case 6: mem_write(m_hl.w, val); break;
+        case 7: m_af.b.h = val; break;
+    }
+}
+
+uint16_t& Z80::reg16_sp(int idx)
+{
+    static uint16_t dummy = 0;
+    switch (idx & 3) {
+        case 0: return m_bc.w;
+        case 1: return m_de.w;
+        case 2: return m_hl.w;
+        case 3: return m_sp.w;
+    }
+    return dummy; // unreachable
+}
+
+uint16_t& Z80::reg16_af(int idx)
+{
+    static uint16_t dummy = 0;
+    switch (idx & 3) {
+        case 0: return m_bc.w;
+        case 1: return m_de.w;
+        case 2: return m_hl.w;
+        case 3: return m_af.w;
+    }
+    return dummy; // unreachable
+}
+
+bool Z80::test_cc(int cc)
+{
+    uint8_t f = m_af.b.l;
+    switch (cc & 7) {
+        case 0: return !(f & ZF);  // NZ
+        case 1: return  (f & ZF);  // Z
+        case 2: return !(f & CF);  // NC
+        case 3: return  (f & CF);  // C
+        case 4: return !(f & PF);  // PO
+        case 5: return  (f & PF);  // PE
+        case 6: return !(f & SF);  // P
+        case 7: return  (f & SF);  // M
+    }
+    return false;
+}
+@
+
+\subsection{Cycle Accounting}
+
+<<z80 cycle accounting>>=
+void Z80::eat(int t_states)
+{
+    m_cycles_remaining -= t_states;
+    m_cycles_consumed += t_states;
+}
+@
+
+\subsection{ALU Operations}
+
+Each ALU helper updates the A register and/or flags. The half-carry and
+overflow flags use lookup tables indexed by the sign bits of the operands
+and result. This matches the approach used by MAME, FUSE, and other
+well-tested Z80 emulators.
+
+The lookup index packs three sign bits:
+\begin{verbatim}
+  bit 2: sign of operand A (before operation)
+  bit 1: sign of operand B
+  bit 0: sign of result
+\end{verbatim}
+
+For half-carry, bits 3 are used instead of bit 7.
+
+<<z80 alu operations>>=
+void Z80::alu_add(uint8_t val)
+{
+    uint16_t result = m_af.b.h + val;
+    uint8_t lookup = ((m_af.b.h & 0x88) >> 3) |
+                     ((val & 0x88) >> 2) |
+                     ((result & 0x88) >> 1);
+    m_af.b.h = result & 0xFF;
+    m_af.b.l = ((result & 0x100) ? CF : 0) |
+               halfcarry_add[lookup & 0x07] |
+               overflow_add[lookup >> 4] |
+               sz53_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_adc(uint8_t val)
+{
+    uint16_t result = m_af.b.h + val + (m_af.b.l & CF);
+    uint8_t lookup = ((m_af.b.h & 0x88) >> 3) |
+                     ((val & 0x88) >> 2) |
+                     ((result & 0x88) >> 1);
+    m_af.b.h = result & 0xFF;
+    m_af.b.l = ((result & 0x100) ? CF : 0) |
+               halfcarry_add[lookup & 0x07] |
+               overflow_add[lookup >> 4] |
+               sz53_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_sub(uint8_t val)
+{
+    uint16_t result = m_af.b.h - val;
+    uint8_t lookup = ((m_af.b.h & 0x88) >> 3) |
+                     ((val & 0x88) >> 2) |
+                     ((result & 0x88) >> 1);
+    m_af.b.h = result & 0xFF;
+    m_af.b.l = ((result & 0x100) ? CF : 0) | NF |
+               halfcarry_sub[lookup & 0x07] |
+               overflow_sub[lookup >> 4] |
+               sz53_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_sbc(uint8_t val)
+{
+    uint16_t result = m_af.b.h - val - (m_af.b.l & CF);
+    uint8_t lookup = ((m_af.b.h & 0x88) >> 3) |
+                     ((val & 0x88) >> 2) |
+                     ((result & 0x88) >> 1);
+    m_af.b.h = result & 0xFF;
+    m_af.b.l = ((result & 0x100) ? CF : 0) | NF |
+               halfcarry_sub[lookup & 0x07] |
+               overflow_sub[lookup >> 4] |
+               sz53_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_and(uint8_t val)
+{
+    m_af.b.h &= val;
+    m_af.b.l = HF | szp_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_xor(uint8_t val)
+{
+    m_af.b.h ^= val;
+    m_af.b.l = szp_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_or(uint8_t val)
+{
+    m_af.b.h |= val;
+    m_af.b.l = szp_table[m_af.b.h];
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_cp(uint8_t val)
+{
+    uint16_t result = m_af.b.h - val;
+    uint8_t lookup = ((m_af.b.h & 0x88) >> 3) |
+                     ((val & 0x88) >> 2) |
+                     ((result & 0x88) >> 1);
+    // CP: Y and X flags come from the operand, not the result
+    m_af.b.l = ((result & 0x100) ? CF : 0) | NF |
+               halfcarry_sub[lookup & 0x07] |
+               overflow_sub[lookup >> 4] |
+               (val & (YF | XF)) |
+               (result & SF) |
+               ((result & 0xFF) == 0 ? ZF : 0);
+    m_q = m_af.b.l;
+}
+
+uint8_t Z80::alu_inc(uint8_t val)
+{
+    uint8_t result = val + 1;
+    m_af.b.l = (m_af.b.l & CF) |
+               ((val & 0x0F) == 0x0F ? HF : 0) |
+               (val == 0x7F ? VF : 0) |
+               sz53_table[result];
+    m_q = m_af.b.l;
+    return result;
+}
+
+uint8_t Z80::alu_dec(uint8_t val)
+{
+    uint8_t result = val - 1;
+    m_af.b.l = (m_af.b.l & CF) | NF |
+               ((val & 0x0F) == 0x00 ? HF : 0) |
+               (val == 0x80 ? VF : 0) |
+               sz53_table[result];
+    m_q = m_af.b.l;
+    return result;
+}
+
+void Z80::alu_add16(PAIR16& dst, uint16_t val)
+{
+    uint32_t result = dst.w + val;
+    m_wz.w = dst.w + 1;
+    m_af.b.l = (m_af.b.l & (SF | ZF | VF)) |
+               (((dst.w ^ result ^ val) >> 8) & HF) |
+               ((result >> 16) & CF) |
+               ((result >> 8) & (YF | XF));
+    dst.w = result & 0xFFFF;
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_adc16(uint16_t val)
+{
+    uint32_t result = m_hl.w + val + (m_af.b.l & CF);
+    m_wz.w = m_hl.w + 1;
+    uint8_t lookup = ((m_hl.w & 0x8800) >> 11) |
+                     ((val & 0x8800) >> 10) |
+                     ((result & 0x8800) >> 9);
+    m_hl.w = result & 0xFFFF;
+    m_af.b.l = ((result >> 16) & CF) |
+               overflow_add[lookup >> 4] |
+               (m_hl.b.h & (SF | YF | XF)) |
+               halfcarry_add[lookup & 0x07] |
+               (m_hl.w == 0 ? ZF : 0);
+    m_q = m_af.b.l;
+}
+
+void Z80::alu_sbc16(uint16_t val)
+{
+    uint32_t result = m_hl.w - val - (m_af.b.l & CF);
+    m_wz.w = m_hl.w + 1;
+    uint8_t lookup = ((m_hl.w & 0x8800) >> 11) |
+                     ((val & 0x8800) >> 10) |
+                     ((result & 0x8800) >> 9);
+    m_hl.w = result & 0xFFFF;
+    m_af.b.l = ((result >> 16) & CF) | NF |
+               overflow_sub[lookup >> 4] |
+               (m_hl.b.h & (SF | YF | XF)) |
+               halfcarry_sub[lookup & 0x07] |
+               (m_hl.w == 0 ? ZF : 0);
+    m_q = m_af.b.l;
+}
+@
+
+\subsection{Execute Loop}
+
+The main execution loop runs instructions until the cycle budget is exhausted.
+Each iteration fetches one opcode, increments the R register, and dispatches.
+
+<<z80 execute loop>>=
+int Z80::execute(int cycles_to_run)
+{
+    m_cycles_remaining = cycles_to_run;
+    m_cycles_consumed = 0;
+
+    while (m_cycles_remaining > 0) {
+        // Process EI delay (interrupts enabled after one instruction)
+        bool was_ei_pending = m_ei_pending;
+        m_ei_pending = false;
+
+        // Handle pending interrupts (unless just executed EI)
+        if (!was_ei_pending) {
+            handle_interrupts();
+        }
+
+        if (m_halted) {
+            // HALT consumes cycles as NOP (4 T-states each)
+            eat(4);
+            m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+            continue;
+        }
+
+        // Fetch and execute one instruction
+        m_prev_q = m_q;  // Save Q from previous instruction for SCF/CCF
+        m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+        uint8_t opcode = fetch();
+        execute_opcode(opcode);
+    }
+
+    return m_cycles_consumed;
+}
+
+int Z80::step()
+{
+    m_cycles_remaining = 100;  // generous budget for one instruction
+    m_cycles_consumed = 0;
+
+    if (m_halted) {
+        eat(4);
+        m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+        m_q = 0;
+        return m_cycles_consumed;
+    }
+
+    m_prev_q = m_q;  // Save Q from previous instruction for SCF/CCF
+    m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+    uint8_t opcode = fetch();
+    execute_opcode(opcode);
+
+    return m_cycles_consumed;
+}
+@
+
+\section{Unprefixed Opcodes}
+
+The Z80's 256 unprefixed opcodes divide into four major blocks:
+\begin{itemize}
+\item \textbf{0x00--0x3F}: Miscellaneous (loads, inc/dec, rotates, jumps)
+\item \textbf{0x40--0x7F}: 8-bit register-to-register loads (and HALT)
+\item \textbf{0x80--0xBF}: 8-bit ALU operations
+\item \textbf{0xC0--0xFF}: Control flow, stack, I/O, prefixes
+\end{itemize}
+
+The LD and ALU blocks are regular enough to decode from the opcode bits.
+The other blocks require individual case handling.
+
+<<z80 unprefixed opcodes>>=
+void Z80::execute_opcode(uint8_t opcode)
+{
+    m_q = 0;  // Default: instruction does not modify flags via ALU
+
+    <<unprefixed 0x40-0x7F load block>>
+    <<unprefixed 0x80-0xBF ALU block>>
+    <<unprefixed 0x00-0x3F misc block>>
+    <<unprefixed 0xC0-0xFF control block>>
+}
+@
+
+\subsection{LD Block (0x40--0x7F)}
+
+This block encodes [[LD dst, src]] where dst = bits 5--3, src = bits 2--0.
+The exception is 0x76 which is [[HALT]] instead of [[LD (HL),(HL)]].
+
+Register-to-register loads take 4 T-states. Loads involving [[(HL)]] take
+7 T-states (4 for the opcode fetch + 3 for the memory access).
+
+<<unprefixed 0x40-0x7F load block>>=
+    if (opcode >= 0x40 && opcode <= 0x7F) {
+        if (opcode == 0x76) {
+            // HALT
+            m_halted = true;
+            eat(4);
+            return;
+        }
+        int dst = (opcode >> 3) & 7;
+        int src = opcode & 7;
+        uint8_t val = read_r8(src);
+        write_r8(dst, val);
+        // 4 cycles base, +3 if src=(HL), +3 if dst=(HL)
+        // (both can't be (HL) since that's HALT)
+        eat((src == 6 || dst == 6) ? 7 : 4);
+        return;
+    }
+@
+
+\subsection{ALU Block (0x80--0xBF)}
+
+This block encodes ALU operations: ADD(0), ADC(1), SUB(2), SBC(3),
+AND(4), XOR(5), OR(6), CP(7) with the source register in bits 2--0.
+
+Register operations take 4 T-states, (HL) variants take 7.
+
+<<unprefixed 0x80-0xBF ALU block>>=
+    if (opcode >= 0x80 && opcode <= 0xBF) {
+        int op = (opcode >> 3) & 7;
+        int src = opcode & 7;
+        uint8_t val = read_r8(src);
+        switch (op) {
+            case 0: alu_add(val); break;
+            case 1: alu_adc(val); break;
+            case 2: alu_sub(val); break;
+            case 3: alu_sbc(val); break;
+            case 4: alu_and(val); break;
+            case 5: alu_xor(val); break;
+            case 6: alu_or(val);  break;
+            case 7: alu_cp(val);  break;
+        }
+        eat(src == 6 ? 7 : 4);
+        return;
+    }
+@
+
+\subsection{Misc Block (0x00--0x3F)}
+
+This block contains 16-bit loads, inc/dec, rotates, relative jumps, DAA,
+CPL, SCF, CCF, and the EX AF,AF' instruction.
+
+<<unprefixed 0x00-0x3F misc block>>=
+    if (opcode <= 0x3F) {
+        switch (opcode) {
+            case 0x00: // NOP
+                eat(4);
+                return;
+
+            case 0x01: // LD BC,nn
+                m_bc.w = fetch16();
+                eat(10);
+                return;
+
+            case 0x02: // LD (BC),A
+                mem_write(m_bc.w, m_af.b.h);
+                m_wz.b.l = (m_bc.w + 1) & 0xFF;
+                m_wz.b.h = m_af.b.h;
+                eat(7);
+                return;
+
+            case 0x03: // INC BC
+                m_bc.w++;
+                eat(6);
+                return;
+
+            case 0x04: // INC B
+                m_bc.b.h = alu_inc(m_bc.b.h);
+                eat(4);
+                return;
+
+            case 0x05: // DEC B
+                m_bc.b.h = alu_dec(m_bc.b.h);
+                eat(4);
+                return;
+
+            case 0x06: // LD B,n
+                m_bc.b.h = fetch();
+                eat(7);
+                return;
+
+            case 0x07: { // RLCA
+                uint8_t a = m_af.b.h;
+                m_af.b.h = (a @<< 1) | (a >> 7);
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) |
+                           (m_af.b.h & (YF | XF | CF));
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x08: { // EX AF,AF'
+                uint16_t tmp = m_af.w;
+                m_af.w = m_af2.w;
+                m_af2.w = tmp;
+                eat(4);
+                return;
+            }
+
+            case 0x09: // ADD HL,BC
+                alu_add16(m_hl, m_bc.w);
+                eat(11);
+                return;
+
+            case 0x0A: // LD A,(BC)
+                m_af.b.h = mem_read(m_bc.w);
+                m_wz.w = m_bc.w + 1;
+                eat(7);
+                return;
+
+            case 0x0B: // DEC BC
+                m_bc.w--;
+                eat(6);
+                return;
+
+            case 0x0C: // INC C
+                m_bc.b.l = alu_inc(m_bc.b.l);
+                eat(4);
+                return;
+
+            case 0x0D: // DEC C
+                m_bc.b.l = alu_dec(m_bc.b.l);
+                eat(4);
+                return;
+
+            case 0x0E: // LD C,n
+                m_bc.b.l = fetch();
+                eat(7);
+                return;
+
+            case 0x0F: { // RRCA
+                uint8_t a = m_af.b.h;
+                m_af.b.h = (a >> 1) | (a @<< 7);
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) |
+                           (m_af.b.h & (YF | XF)) |
+                           (a & CF);
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x10: { // DJNZ e
+                int8_t offset = (int8_t)fetch();
+                m_bc.b.h--;
+                if (m_bc.b.h != 0) {
+                    m_pc.w += offset;
+                    m_wz.w = m_pc.w;
+                    eat(13);
+                } else {
+                    eat(8);
+                }
+                return;
+            }
+
+            case 0x11: // LD DE,nn
+                m_de.w = fetch16();
+                eat(10);
+                return;
+
+            case 0x12: // LD (DE),A
+                mem_write(m_de.w, m_af.b.h);
+                m_wz.b.l = (m_de.w + 1) & 0xFF;
+                m_wz.b.h = m_af.b.h;
+                eat(7);
+                return;
+
+            case 0x13: // INC DE
+                m_de.w++;
+                eat(6);
+                return;
+
+            case 0x14: // INC D
+                m_de.b.h = alu_inc(m_de.b.h);
+                eat(4);
+                return;
+
+            case 0x15: // DEC D
+                m_de.b.h = alu_dec(m_de.b.h);
+                eat(4);
+                return;
+
+            case 0x16: // LD D,n
+                m_de.b.h = fetch();
+                eat(7);
+                return;
+
+            case 0x17: { // RLA
+                uint8_t a = m_af.b.h;
+                uint8_t c = m_af.b.l & CF;
+                m_af.b.h = (a << 1) | c;
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) |
+                           (m_af.b.h & (YF | XF)) |
+                           (a >> 7);
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x18: { // JR e
+                int8_t offset = (int8_t)fetch();
+                m_pc.w += offset;
+                m_wz.w = m_pc.w;
+                eat(12);
+                return;
+            }
+
+            case 0x19: // ADD HL,DE
+                alu_add16(m_hl, m_de.w);
+                eat(11);
+                return;
+
+            case 0x1A: // LD A,(DE)
+                m_af.b.h = mem_read(m_de.w);
+                m_wz.w = m_de.w + 1;
+                eat(7);
+                return;
+
+            case 0x1B: // DEC DE
+                m_de.w--;
+                eat(6);
+                return;
+
+            case 0x1C: // INC E
+                m_de.b.l = alu_inc(m_de.b.l);
+                eat(4);
+                return;
+
+            case 0x1D: // DEC E
+                m_de.b.l = alu_dec(m_de.b.l);
+                eat(4);
+                return;
+
+            case 0x1E: // LD E,n
+                m_de.b.l = fetch();
+                eat(7);
+                return;
+
+            case 0x1F: { // RRA
+                uint8_t a = m_af.b.h;
+                uint8_t c = m_af.b.l & CF;
+                m_af.b.h = (a >> 1) | (c @<< 7);
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) |
+                           (m_af.b.h & (YF | XF)) |
+                           (a & CF);
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x20: { // JR NZ,e
+                int8_t offset = (int8_t)fetch();
+                if (!(m_af.b.l & ZF)) {
+                    m_pc.w += offset;
+                    m_wz.w = m_pc.w;
+                    eat(12);
+                } else {
+                    eat(7);
+                }
+                return;
+            }
+
+            case 0x21: // LD HL,nn
+                m_hl.w = fetch16();
+                eat(10);
+                return;
+
+            case 0x22: { // LD (nn),HL
+                uint16_t addr = fetch16();
+                mem_write(addr, m_hl.b.l);
+                mem_write(addr + 1, m_hl.b.h);
+                m_wz.w = addr + 1;
+                eat(16);
+                return;
+            }
+
+            case 0x23: // INC HL
+                m_hl.w++;
+                eat(6);
+                return;
+
+            case 0x24: // INC H
+                m_hl.b.h = alu_inc(m_hl.b.h);
+                eat(4);
+                return;
+
+            case 0x25: // DEC H
+                m_hl.b.h = alu_dec(m_hl.b.h);
+                eat(4);
+                return;
+
+            case 0x26: // LD H,n
+                m_hl.b.h = fetch();
+                eat(7);
+                return;
+
+            case 0x27: { // DAA
+                uint8_t a = m_af.b.h;
+                uint8_t f = m_af.b.l;
+                uint8_t correction = 0;
+                uint8_t new_c = f & CF;
+
+                if ((a & 0x0F) > 9 || (f & HF)) {
+                    correction |= 0x06;
+                }
+                if (a > 0x99 || (f & CF)) {
+                    correction |= 0x60;
+                    new_c = CF;
+                }
+
+                if (f & NF) {
+                    m_af.b.h -= correction;
+                } else {
+                    m_af.b.h += correction;
+                }
+
+                m_af.b.l = szp_table[m_af.b.h] |
+                           (f & NF) |
+                           new_c |
+                           ((a ^ m_af.b.h) & HF);
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x28: { // JR Z,e
+                int8_t offset = (int8_t)fetch();
+                if (m_af.b.l & ZF) {
+                    m_pc.w += offset;
+                    m_wz.w = m_pc.w;
+                    eat(12);
+                } else {
+                    eat(7);
+                }
+                return;
+            }
+
+            case 0x29: // ADD HL,HL
+                alu_add16(m_hl, m_hl.w);
+                eat(11);
+                return;
+
+            case 0x2A: { // LD HL,(nn)
+                uint16_t addr = fetch16();
+                m_hl.b.l = mem_read(addr);
+                m_hl.b.h = mem_read(addr + 1);
+                m_wz.w = addr + 1;
+                eat(16);
+                return;
+            }
+
+            case 0x2B: // DEC HL
+                m_hl.w--;
+                eat(6);
+                return;
+
+            case 0x2C: // INC L
+                m_hl.b.l = alu_inc(m_hl.b.l);
+                eat(4);
+                return;
+
+            case 0x2D: // DEC L
+                m_hl.b.l = alu_dec(m_hl.b.l);
+                eat(4);
+                return;
+
+            case 0x2E: // LD L,n
+                m_hl.b.l = fetch();
+                eat(7);
+                return;
+
+            case 0x2F: // CPL
+                m_af.b.h ^= 0xFF;
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF | CF)) |
+                           (m_af.b.h & (YF | XF)) |
+                           HF | NF;
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+
+            case 0x30: { // JR NC,e
+                int8_t offset = (int8_t)fetch();
+                if (!(m_af.b.l & CF)) {
+                    m_pc.w += offset;
+                    m_wz.w = m_pc.w;
+                    eat(12);
+                } else {
+                    eat(7);
+                }
+                return;
+            }
+
+            case 0x31: // LD SP,nn
+                m_sp.w = fetch16();
+                eat(10);
+                return;
+
+            case 0x32: { // LD (nn),A
+                uint16_t addr = fetch16();
+                mem_write(addr, m_af.b.h);
+                m_wz.b.l = (addr + 1) & 0xFF;
+                m_wz.b.h = m_af.b.h;
+                eat(13);
+                return;
+            }
+
+            case 0x33: // INC SP
+                m_sp.w++;
+                eat(6);
+                return;
+
+            case 0x34: { // INC (HL)
+                uint8_t val = mem_read(m_hl.w);
+                val = alu_inc(val);
+                mem_write(m_hl.w, val);
+                eat(11);
+                return;
+            }
+
+            case 0x35: { // DEC (HL)
+                uint8_t val = mem_read(m_hl.w);
+                val = alu_dec(val);
+                mem_write(m_hl.w, val);
+                eat(11);
+                return;
+            }
+
+            case 0x36: // LD (HL),n
+                mem_write(m_hl.w, fetch());
+                eat(10);
+                return;
+
+            case 0x37: { // SCF
+                uint8_t yx = ((m_prev_q ^ m_af.b.l) | m_af.b.h) & (YF | XF);
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) | yx | CF;
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            case 0x38: { // JR C,e
+                int8_t offset = (int8_t)fetch();
+                if (m_af.b.l & CF) {
+                    m_pc.w += offset;
+                    m_wz.w = m_pc.w;
+                    eat(12);
+                } else {
+                    eat(7);
+                }
+                return;
+            }
+
+            case 0x39: // ADD HL,SP
+                alu_add16(m_hl, m_sp.w);
+                eat(11);
+                return;
+
+            case 0x3A: { // LD A,(nn)
+                uint16_t addr = fetch16();
+                m_af.b.h = mem_read(addr);
+                m_wz.w = addr + 1;
+                eat(13);
+                return;
+            }
+
+            case 0x3B: // DEC SP
+                m_sp.w--;
+                eat(6);
+                return;
+
+            case 0x3C: // INC A
+                m_af.b.h = alu_inc(m_af.b.h);
+                eat(4);
+                return;
+
+            case 0x3D: // DEC A
+                m_af.b.h = alu_dec(m_af.b.h);
+                eat(4);
+                return;
+
+            case 0x3E: // LD A,n
+                m_af.b.h = fetch();
+                eat(7);
+                return;
+
+            case 0x3F: { // CCF
+                uint8_t yx = ((m_prev_q ^ m_af.b.l) | m_af.b.h) & (YF | XF);
+                m_af.b.l = (m_af.b.l & (SF | ZF | PF)) |
+                           ((m_af.b.l & CF) ? HF : 0) |
+                           yx |
+                           ((m_af.b.l & CF) ^ CF);
+                m_q = m_af.b.l;
+                eat(4);
+                return;
+            }
+
+            default:
+                std::fprintf(stderr, "Z80: unimplemented opcode 0x%02X at PC=0x%04X\n",
+                             opcode, m_pc.w - 1);
+                eat(4);
+                return;
+        }
+    }
+@
+
+\subsection{Control Block (0xC0--0xFF)}
+
+This block contains conditional returns, push/pop, jumps, calls, RST,
+I/O instructions, the EI/DI pair, exchange instructions, and the prefix
+escape bytes (CB, DD, ED, FD).
+
+<<unprefixed 0xC0-0xFF control block>>=
+    // 0xC0-0xFF
+    switch (opcode) {
+        case 0xC0: // RET NZ
+            if (!(m_af.b.l & ZF)) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xC1: // POP BC
+            m_bc.b.l = mem_read(m_sp.w++);
+            m_bc.b.h = mem_read(m_sp.w++);
+            eat(10);
+            return;
+
+        case 0xC2: { // JP NZ,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & ZF)) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xC3: { // JP nn
+            uint16_t addr = fetch16();
+            m_pc.w = addr;
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xC4: { // CALL NZ,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & ZF)) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xC5: // PUSH BC
+            mem_write(--m_sp.w, m_bc.b.h);
+            mem_write(--m_sp.w, m_bc.b.l);
+            eat(11);
+            return;
+
+        case 0xC6: // ADD A,n
+            alu_add(fetch());
+            eat(7);
+            return;
+
+        case 0xC7: // RST 00
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0000;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xC8: // RET Z
+            if (m_af.b.l & ZF) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xC9: // RET
+            m_pc.b.l = mem_read(m_sp.w++);
+            m_pc.b.h = mem_read(m_sp.w++);
+            m_wz.w = m_pc.w;
+            eat(10);
+            return;
+
+        case 0xCA: { // JP Z,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & ZF) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xCB: // CB prefix
+            execute_cb();
+            return;
+
+        case 0xCC: { // CALL Z,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & ZF) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xCD: { // CALL nn
+            uint16_t addr = fetch16();
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = addr;
+            m_wz.w = addr;
+            eat(17);
+            return;
+        }
+
+        case 0xCE: // ADC A,n
+            alu_adc(fetch());
+            eat(7);
+            return;
+
+        case 0xCF: // RST 08
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0008;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xD0: // RET NC
+            if (!(m_af.b.l & CF)) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xD1: // POP DE
+            m_de.b.l = mem_read(m_sp.w++);
+            m_de.b.h = mem_read(m_sp.w++);
+            eat(10);
+            return;
+
+        case 0xD2: { // JP NC,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & CF)) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xD3: { // OUT (n),A
+            uint8_t port = fetch();
+            uint16_t addr = (m_af.b.h << 8) | port;
+            io_write(addr, m_af.b.h);
+            m_wz.b.l = port + 1;
+            m_wz.b.h = m_af.b.h;
+            eat(11);
+            return;
+        }
+
+        case 0xD4: { // CALL NC,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & CF)) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xD5: // PUSH DE
+            mem_write(--m_sp.w, m_de.b.h);
+            mem_write(--m_sp.w, m_de.b.l);
+            eat(11);
+            return;
+
+        case 0xD6: // SUB n
+            alu_sub(fetch());
+            eat(7);
+            return;
+
+        case 0xD7: // RST 10
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0010;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xD8: // RET C
+            if (m_af.b.l & CF) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xD9: { // EXX
+            uint16_t tmp;
+            tmp = m_bc.w; m_bc.w = m_bc2.w; m_bc2.w = tmp;
+            tmp = m_de.w; m_de.w = m_de2.w; m_de2.w = tmp;
+            tmp = m_hl.w; m_hl.w = m_hl2.w; m_hl2.w = tmp;
+            eat(4);
+            return;
+        }
+
+        case 0xDA: { // JP C,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & CF) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xDB: { // IN A,(n)
+            uint8_t port = fetch();
+            uint16_t full_addr = (m_af.b.h @<< 8) | port;
+            m_wz.w = full_addr + 1;
+            m_af.b.h = io_read(full_addr);
+            eat(11);
+            return;
+        }
+
+        case 0xDC: { // CALL C,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & CF) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xDD: // DD prefix (IX instructions)
+            execute_dd();
+            return;
+
+        case 0xDE: // SBC A,n
+            alu_sbc(fetch());
+            eat(7);
+            return;
+
+        case 0xDF: // RST 18
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0018;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xE0: // RET PO
+            if (!(m_af.b.l & PF)) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xE1: // POP HL
+            m_hl.b.l = mem_read(m_sp.w++);
+            m_hl.b.h = mem_read(m_sp.w++);
+            eat(10);
+            return;
+
+        case 0xE2: { // JP PO,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & PF)) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xE3: { // EX (SP),HL
+            uint8_t lo = mem_read(m_sp.w);
+            uint8_t hi = mem_read(m_sp.w + 1);
+            mem_write(m_sp.w, m_hl.b.l);
+            mem_write(m_sp.w + 1, m_hl.b.h);
+            m_hl.b.l = lo;
+            m_hl.b.h = hi;
+            m_wz.w = m_hl.w;
+            eat(19);
+            return;
+        }
+
+        case 0xE4: { // CALL PO,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & PF)) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xE5: // PUSH HL
+            mem_write(--m_sp.w, m_hl.b.h);
+            mem_write(--m_sp.w, m_hl.b.l);
+            eat(11);
+            return;
+
+        case 0xE6: // AND n
+            alu_and(fetch());
+            eat(7);
+            return;
+
+        case 0xE7: // RST 20
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0020;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xE8: // RET PE
+            if (m_af.b.l & PF) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xE9: // JP (HL)
+            m_pc.w = m_hl.w;
+            eat(4);
+            return;
+
+        case 0xEA: { // JP PE,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & PF) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xEB: { // EX DE,HL
+            uint16_t tmp = m_de.w;
+            m_de.w = m_hl.w;
+            m_hl.w = tmp;
+            eat(4);
+            return;
+        }
+
+        case 0xEC: { // CALL PE,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & PF) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xED: // ED prefix
+            execute_ed();
+            return;
+
+        case 0xEE: // XOR n
+            alu_xor(fetch());
+            eat(7);
+            return;
+
+        case 0xEF: // RST 28
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0028;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xF0: // RET P
+            if (!(m_af.b.l & SF)) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xF1: // POP AF
+            m_af.b.l = mem_read(m_sp.w++);
+            m_af.b.h = mem_read(m_sp.w++);
+            eat(10);
+            return;
+
+        case 0xF2: { // JP P,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & SF)) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xF3: // DI
+            m_iff1 = 0;
+            m_iff2 = 0;
+            eat(4);
+            return;
+
+        case 0xF4: { // CALL P,nn
+            uint16_t addr = fetch16();
+            if (!(m_af.b.l & SF)) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xF5: // PUSH AF
+            mem_write(--m_sp.w, m_af.b.h);
+            mem_write(--m_sp.w, m_af.b.l);
+            eat(11);
+            return;
+
+        case 0xF6: // OR n
+            alu_or(fetch());
+            eat(7);
+            return;
+
+        case 0xF7: // RST 30
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0030;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        case 0xF8: // RET M
+            if (m_af.b.l & SF) {
+                m_pc.b.l = mem_read(m_sp.w++);
+                m_pc.b.h = mem_read(m_sp.w++);
+                m_wz.w = m_pc.w;
+                eat(11);
+            } else {
+                eat(5);
+            }
+            return;
+
+        case 0xF9: // LD SP,HL
+            m_sp.w = m_hl.w;
+            eat(6);
+            return;
+
+        case 0xFA: { // JP M,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & SF) {
+                m_pc.w = addr;
+            }
+            m_wz.w = addr;
+            eat(10);
+            return;
+        }
+
+        case 0xFB: // EI
+            m_iff1 = 1;
+            m_iff2 = 1;
+            m_ei_pending = true;
+            eat(4);
+            return;
+
+        case 0xFC: { // CALL M,nn
+            uint16_t addr = fetch16();
+            if (m_af.b.l & SF) {
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = addr;
+                eat(17);
+            } else {
+                eat(10);
+            }
+            m_wz.w = addr;
+            return;
+        }
+
+        case 0xFD: // FD prefix (IY instructions)
+            execute_fd();
+            return;
+
+        case 0xFE: // CP n
+            alu_cp(fetch());
+            eat(7);
+            return;
+
+        case 0xFF: // RST 38
+            mem_write(--m_sp.w, m_pc.b.h);
+            mem_write(--m_sp.w, m_pc.b.l);
+            m_pc.w = 0x0038;
+            m_wz.w = m_pc.w;
+            eat(11);
+            return;
+
+        default:
+            std::fprintf(stderr, "Z80: unimplemented opcode 0x%02X at PC=0x%04X\n",
+                         opcode, m_pc.w - 1);
+            eat(4);
+            return;
+    }
+@
+
+\section{CB Prefix: Bit Operations}
+
+The CB prefix introduces rotate, shift, bit test, reset, and set operations.
+The opcode byte following CB encodes:
+\begin{itemize}
+\item Bits 7--6: operation group (rotate/shift=0, BIT=1, RES=2, SET=3)
+\item Bits 5--3: bit number (for BIT/RES/SET) or shift type (for group 0)
+\item Bits 2--0: register index (same as unprefixed)
+\end{itemize}
+
+Shift types in group 0: RLC(0), RRC(1), RL(2), RR(3), SLA(4), SRA(5),
+SLL(6, undocumented), SRL(7).
+
+<<z80 cb prefix>>=
+void Z80::execute_cb()
+{
+    m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+    uint8_t op = fetch();
+    int reg = op & 7;
+    int bit = (op >> 3) & 7;
+    uint8_t val = read_r8(reg);
+    bool is_hl = (reg == 6);
+
+    switch (op & 0xC0) {
+        case 0x00: { // Rotates and shifts
+            uint8_t result;
+            switch (bit) {
+                case 0: // RLC
+                    result = (val @<< 1) | (val >> 7);
+                    m_af.b.l = (val >> 7) | szp_table[result];
+                    break;
+                case 1: // RRC
+                    result = (val >> 1) | (val @<< 7);
+                    m_af.b.l = (val & CF) | szp_table[result];
+                    break;
+                case 2: // RL
+                    result = (val << 1) | (m_af.b.l & CF);
+                    m_af.b.l = (val >> 7) | szp_table[result];
+                    break;
+                case 3: // RR
+                    result = (val >> 1) | ((m_af.b.l & CF) @<< 7);
+                    m_af.b.l = (val & CF) | szp_table[result];
+                    break;
+                case 4: // SLA
+                    result = val << 1;
+                    m_af.b.l = (val >> 7) | szp_table[result];
+                    break;
+                case 5: // SRA
+                    result = (val >> 1) | (val & 0x80);
+                    m_af.b.l = (val & CF) | szp_table[result];
+                    break;
+                case 6: // SLL (undocumented: shift left, bit 0 = 1)
+                    result = (val << 1) | 0x01;
+                    m_af.b.l = (val >> 7) | szp_table[result];
+                    break;
+                case 7: // SRL
+                    result = val >> 1;
+                    m_af.b.l = (val & CF) | szp_table[result];
+                    break;
+                default:
+                    result = val;
+                    break;
+            }
+            write_r8(reg, result);
+            m_q = m_af.b.l;
+            eat(is_hl ? 15 : 8);
+            break;
+        }
+
+        case 0x40: { // BIT b,r
+            uint8_t result = val & (1 << bit);
+            // BIT sets Z if bit is 0, S if bit 7, PV=Z (parity of single-bit result)
+            m_af.b.l = (m_af.b.l & CF) | HF |
+                       (result ? (result & SF) : (ZF | PF)) |
+                       (val & (YF | XF));
+            if (is_hl) {
+                // BIT n,(HL): Y and X come from high byte of WZ
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) | (m_wz.b.h & (YF | XF));
+            }
+            m_q = m_af.b.l;
+            eat(is_hl ? 12 : 8);
+            break;
+        }
+
+        case 0x80: // RES b,r
+            write_r8(reg, val & ~(1 << bit));
+            eat(is_hl ? 15 : 8);
+            break;
+
+        case 0xC0: // SET b,r
+            write_r8(reg, val | (1 << bit));
+            eat(is_hl ? 15 : 8);
+            break;
+    }
+}
+@
+
+\section{ED Prefix: Extended Operations}
+
+The ED prefix introduces block transfer/search/I/O operations, 16-bit
+arithmetic with carry, I/O with flags, and interrupt mode selection.
+Undefined ED opcodes are NOPs (8 T-states, 2 for the ED fetch + 2 for
+the opcode fetch... actually undefined ED xx is treated as a two-byte NOP
+consuming 8 T-states total).
+
+<<z80 ed prefix>>=
+void Z80::execute_ed()
+{
+    m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+    uint8_t op = fetch();
+
+    switch (op) {
+        // IN r,(C) -- 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78
+        case 0x40: case 0x48: case 0x50: case 0x58:
+        case 0x60: case 0x68: case 0x70: case 0x78: {
+            uint8_t val = io_read(m_bc.w);
+            m_wz.w = m_bc.w + 1;
+            int dst = (op >> 3) & 7;
+            if (dst != 6) { // 0x70 = IN (HL) -- result discarded
+                write_r8(dst, val);
+            }
+            m_af.b.l = (m_af.b.l & CF) | szp_table[val];
+            m_q = m_af.b.l;
+            eat(12);
+            return;
+        }
+
+        // OUT (C),r -- 0x41, 0x49, 0x51, 0x59, 0x61, 0x69, 0x71, 0x79
+        case 0x41: case 0x49: case 0x51: case 0x59:
+        case 0x61: case 0x69: case 0x71: case 0x79: {
+            int src = (op >> 3) & 7;
+            uint8_t val = (src == 6) ? 0 : read_r8(src); // 0x71 = OUT (C),0
+            io_write(m_bc.w, val);
+            m_wz.w = m_bc.w + 1;
+            eat(12);
+            return;
+        }
+
+        // SBC HL,rr -- 0x42, 0x52, 0x62, 0x72
+        case 0x42: case 0x52: case 0x62: case 0x72: {
+            int pair = (op >> 4) & 3;
+            alu_sbc16(reg16_sp(pair));
+            eat(15);
+            return;
+        }
+
+        // ADC HL,rr -- 0x4A, 0x5A, 0x6A, 0x7A
+        case 0x4A: case 0x5A: case 0x6A: case 0x7A: {
+            int pair = (op >> 4) & 3;
+            alu_adc16(reg16_sp(pair));
+            eat(15);
+            return;
+        }
+
+        // LD (nn),rr -- 0x43, 0x53, 0x63, 0x73
+        case 0x43: case 0x53: case 0x63: case 0x73: {
+            uint16_t addr = fetch16();
+            int pair = (op >> 4) & 3;
+            uint16_t val = reg16_sp(pair);
+            mem_write(addr, val & 0xFF);
+            mem_write(addr + 1, val >> 8);
+            m_wz.w = addr + 1;
+            eat(20);
+            return;
+        }
+
+        // LD rr,(nn) -- 0x4B, 0x5B, 0x6B, 0x7B
+        case 0x4B: case 0x5B: case 0x6B: case 0x7B: {
+            uint16_t addr = fetch16();
+            int pair = (op >> 4) & 3;
+            uint16_t& dst = reg16_sp(pair);
+            dst = mem_read(addr) | (mem_read(addr + 1) << 8);
+            m_wz.w = addr + 1;
+            eat(20);
+            return;
+        }
+
+        case 0x44: case 0x54: case 0x64: case 0x74:
+        case 0x4C: case 0x5C: case 0x6C: case 0x7C: {
+            // NEG (all are identical; official is 0x44, others undocumented)
+            uint8_t old_a = m_af.b.h;
+            m_af.b.h = 0;
+            alu_sub(old_a);
+            eat(8);
+            return;
+        }
+
+        case 0x45: case 0x55: case 0x65: case 0x75:
+        case 0x5D: case 0x6D: case 0x7D: // RETN
+            m_iff1 = m_iff2;
+            m_pc.b.l = mem_read(m_sp.w++);
+            m_pc.b.h = mem_read(m_sp.w++);
+            m_wz.w = m_pc.w;
+            eat(14);
+            return;
+
+        case 0x4D: // RETI
+            m_iff1 = m_iff2;
+            m_pc.b.l = mem_read(m_sp.w++);
+            m_pc.b.h = mem_read(m_sp.w++);
+            m_wz.w = m_pc.w;
+            eat(14);
+            return;
+
+        case 0x46: case 0x4E: case 0x66: case 0x6E: // IM 0
+            m_im = 0;
+            eat(8);
+            return;
+
+        case 0x56: case 0x76: // IM 1
+            m_im = 1;
+            eat(8);
+            return;
+
+        case 0x5E: case 0x7E: // IM 2
+            m_im = 2;
+            eat(8);
+            return;
+
+        case 0x47: // LD I,A
+            m_i = m_af.b.h;
+            eat(9);
+            return;
+
+        case 0x4F: // LD R,A
+            m_r = m_af.b.h;
+            eat(9);
+            return;
+
+        case 0x57: // LD A,I
+            m_af.b.h = m_i;
+            m_af.b.l = (m_af.b.l & CF) |
+                       sz53_table[m_i] |
+                       (m_iff2 ? PF : 0);
+            m_q = m_af.b.l;
+            eat(9);
+            return;
+
+        case 0x5F: // LD A,R
+            m_af.b.h = m_r;
+            m_af.b.l = (m_af.b.l & CF) |
+                       sz53_table[m_r] |
+                       (m_iff2 ? PF : 0);
+            m_q = m_af.b.l;
+            eat(9);
+            return;
+
+        case 0x67: { // RRD
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_hl.w, (m_af.b.h @<< 4) | (val >> 4));
+            m_af.b.h = (m_af.b.h & 0xF0) | (val & 0x0F);
+            m_af.b.l = (m_af.b.l & CF) | szp_table[m_af.b.h];
+            m_q = m_af.b.l;
+            m_wz.w = m_hl.w + 1;
+            eat(18);
+            return;
+        }
+
+        case 0x6F: { // RLD
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_hl.w, (val << 4) | (m_af.b.h & 0x0F));
+            m_af.b.h = (m_af.b.h & 0xF0) | (val >> 4);
+            m_af.b.l = (m_af.b.l & CF) | szp_table[m_af.b.h];
+            m_q = m_af.b.l;
+            m_wz.w = m_hl.w + 1;
+            eat(18);
+            return;
+        }
+
+        // Block transfer and search
+        case 0xA0: { // LDI
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_de.w, val);
+            m_hl.w++;
+            m_de.w++;
+            m_bc.w--;
+            uint8_t n = val + m_af.b.h;
+            m_af.b.l = (m_af.b.l & (SF | ZF | CF)) |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xA1: { // CPI
+            uint8_t val = mem_read(m_hl.w);
+            uint8_t result = m_af.b.h - val;
+            uint8_t hf = ((m_af.b.h ^ val ^ result) & 0x10);
+            m_hl.w++;
+            m_bc.w--;
+            uint8_t n = result - (hf ? 1 : 0);
+            m_af.b.l = (m_af.b.l & CF) | NF |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (hf ? HF : 0) |
+                       (result & SF) |
+                       (result == 0 ? ZF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            m_q = m_af.b.l;
+            m_wz.w++;
+            eat(16);
+            return;
+        }
+
+        case 0xA2: { // INI
+            uint8_t val = io_read(m_bc.w);
+            m_wz.w = m_bc.w + 1;
+            m_bc.b.h--;
+            mem_write(m_hl.w, val);
+            m_hl.w++;
+            uint16_t k = val + ((m_bc.b.l + 1) & 0xFF);
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xA3: { // OUTI
+            uint8_t val = mem_read(m_hl.w);
+            m_bc.b.h--;
+            io_write(m_bc.w, val);
+            m_hl.w++;
+            m_wz.w = m_bc.w + 1;
+            uint16_t k = val + m_hl.b.l;
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xA8: { // LDD
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_de.w, val);
+            m_hl.w--;
+            m_de.w--;
+            m_bc.w--;
+            uint8_t n = val + m_af.b.h;
+            m_af.b.l = (m_af.b.l & (SF | ZF | CF)) |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xA9: { // CPD
+            uint8_t val = mem_read(m_hl.w);
+            uint8_t result = m_af.b.h - val;
+            uint8_t hf = ((m_af.b.h ^ val ^ result) & 0x10);
+            m_hl.w--;
+            m_bc.w--;
+            uint8_t n = result - (hf ? 1 : 0);
+            m_af.b.l = (m_af.b.l & CF) | NF |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (hf ? HF : 0) |
+                       (result & SF) |
+                       (result == 0 ? ZF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            m_q = m_af.b.l;
+            m_wz.w--;
+            eat(16);
+            return;
+        }
+
+        case 0xAA: { // IND
+            uint8_t val = io_read(m_bc.w);
+            m_wz.w = m_bc.w - 1;
+            m_bc.b.h--;
+            mem_write(m_hl.w, val);
+            m_hl.w--;
+            uint16_t k = val + ((m_bc.b.l - 1) & 0xFF);
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xAB: { // OUTD
+            uint8_t val = mem_read(m_hl.w);
+            m_bc.b.h--;
+            io_write(m_bc.w, val);
+            m_hl.w--;
+            m_wz.w = m_bc.w - 1;
+            uint16_t k = val + m_hl.b.l;
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            m_q = m_af.b.l;
+            eat(16);
+            return;
+        }
+
+        case 0xB0: { // LDIR
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_de.w, val);
+            m_hl.w++;
+            m_de.w++;
+            m_bc.w--;
+            uint8_t n = val + m_af.b.h;
+            m_af.b.l = (m_af.b.l & (SF | ZF | CF)) |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            if (m_bc.w != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X flags come from PC bits
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xB1: { // CPIR
+            uint8_t val = mem_read(m_hl.w);
+            uint8_t result = m_af.b.h - val;
+            uint8_t hf = ((m_af.b.h ^ val ^ result) & 0x10);
+            m_hl.w++;
+            m_bc.w--;
+            uint8_t n = result - (hf ? 1 : 0);
+            m_af.b.l = (m_af.b.l & CF) | NF |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (hf ? HF : 0) |
+                       (result & SF) |
+                       (result == 0 ? ZF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            if (m_bc.w != 0 && result != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X flags come from PC bits
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                eat(21);
+            } else {
+                m_wz.w++;
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xB2: { // INIR
+            uint8_t val = io_read(m_bc.w);
+            m_wz.w = m_bc.w + 1;
+            m_bc.b.h--;
+            mem_write(m_hl.w, val);
+            m_hl.w++;
+            uint16_t k = val + ((m_bc.b.l + 1) & 0xFF);
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            if (m_bc.b.h != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X from PC bits, PF/HF adjusted
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                if (m_af.b.l & CF) {
+                    if (val & 0x80) {
+                        if (!parity_table[(m_bc.b.h - 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x00 ? HF : 0);
+                    } else {
+                        if (!parity_table[(m_bc.b.h + 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x0F ? HF : 0);
+                    }
+                } else {
+                    if (!parity_table[m_bc.b.h & 7]) m_af.b.l ^= PF;
+                }
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xB3: { // OTIR
+            uint8_t val = mem_read(m_hl.w);
+            m_bc.b.h--;
+            io_write(m_bc.w, val);
+            m_hl.w++;
+            m_wz.w = m_bc.w + 1;
+            uint16_t k = val + m_hl.b.l;
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            if (m_bc.b.h != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X from PC bits, PF/HF adjusted
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                if (m_af.b.l & CF) {
+                    if (val & 0x80) {
+                        if (!parity_table[(m_bc.b.h - 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x00 ? HF : 0);
+                    } else {
+                        if (!parity_table[(m_bc.b.h + 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x0F ? HF : 0);
+                    }
+                } else {
+                    if (!parity_table[m_bc.b.h & 7]) m_af.b.l ^= PF;
+                }
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xB8: { // LDDR
+            uint8_t val = mem_read(m_hl.w);
+            mem_write(m_de.w, val);
+            m_hl.w--;
+            m_de.w--;
+            m_bc.w--;
+            uint8_t n = val + m_af.b.h;
+            m_af.b.l = (m_af.b.l & (SF | ZF | CF)) |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            if (m_bc.w != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X flags come from PC bits
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xB9: { // CPDR
+            uint8_t val = mem_read(m_hl.w);
+            uint8_t result = m_af.b.h - val;
+            uint8_t hf = ((m_af.b.h ^ val ^ result) & 0x10);
+            m_hl.w--;
+            m_bc.w--;
+            uint8_t n = result - (hf ? 1 : 0);
+            m_af.b.l = (m_af.b.l & CF) | NF |
+                       (m_bc.w != 0 ? PF : 0) |
+                       (hf ? HF : 0) |
+                       (result & SF) |
+                       (result == 0 ? ZF : 0) |
+                       (n & XF) |
+                       ((n & 0x02) ? YF : 0);
+            if (m_bc.w != 0 && result != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X flags come from PC bits
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                eat(21);
+            } else {
+                m_wz.w--;
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xBA: { // INDR
+            uint8_t val = io_read(m_bc.w);
+            m_wz.w = m_bc.w - 1;
+            m_bc.b.h--;
+            mem_write(m_hl.w, val);
+            m_hl.w--;
+            uint16_t k = val + ((m_bc.b.l - 1) & 0xFF);
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            if (m_bc.b.h != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X from PC bits, PF/HF adjusted
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                if (m_af.b.l & CF) {
+                    if (val & 0x80) {
+                        if (!parity_table[(m_bc.b.h - 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x00 ? HF : 0);
+                    } else {
+                        if (!parity_table[(m_bc.b.h + 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x0F ? HF : 0);
+                    }
+                } else {
+                    if (!parity_table[m_bc.b.h & 7]) m_af.b.l ^= PF;
+                }
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        case 0xBB: { // OTDR
+            uint8_t val = mem_read(m_hl.w);
+            m_bc.b.h--;
+            io_write(m_bc.w, val);
+            m_hl.w--;
+            m_wz.w = m_bc.w - 1;
+            uint16_t k = val + m_hl.b.l;
+            m_af.b.l = sz53_table[m_bc.b.h] |
+                       (val & SF ? NF : 0) |
+                       ((k > 255) ? (HF | CF) : 0) |
+                       parity_table[(k & 7) ^ m_bc.b.h];
+            if (m_bc.b.h != 0) {
+                m_pc.w -= 2;
+                m_wz.w = m_pc.w + 1;
+                // Repeat: Y/X from PC bits, PF/HF adjusted
+                m_af.b.l = (m_af.b.l & ~(YF | XF)) |
+                           ((m_pc.w & (1 << 13)) ? YF : 0) |
+                           ((m_pc.w & (1 << 11)) ? XF : 0);
+                if (m_af.b.l & CF) {
+                    if (val & 0x80) {
+                        if (!parity_table[(m_bc.b.h - 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x00 ? HF : 0);
+                    } else {
+                        if (!parity_table[(m_bc.b.h + 1) & 7]) m_af.b.l ^= PF;
+                        m_af.b.l = (m_af.b.l & ~HF) | ((m_bc.b.h & 0x0F) == 0x0F ? HF : 0);
+                    }
+                } else {
+                    if (!parity_table[m_bc.b.h & 7]) m_af.b.l ^= PF;
+                }
+                eat(21);
+            } else {
+                eat(16);
+            }
+            m_q = m_af.b.l;
+            return;
+        }
+
+        default:
+            // Undefined ED opcodes are two-byte NOPs
+            eat(8);
+            return;
+    }
+}
+@
+
+\section{DD/FD Prefix: Index Register Operations}
+
+The DD and FD prefixes replace HL with IX and IY respectively in most
+instructions. Where unprefixed uses [[(HL)]], the indexed version reads
+a displacement byte and accesses [[(IX+d)]] or [[(IY+d)]].
+
+The undocumented registers IXH, IXL, IYH, IYL are accessible through
+the same encoding (H=4, L=5 in the register field), but only for
+instructions that do not involve [[(HL)]].
+
+A shared [[execute\_index]] function handles both DD and FD prefixes.
+
+<<z80 dd fd prefix>>=
+void Z80::execute_dd()
+{
+    execute_index(m_ix);
+}
+
+void Z80::execute_fd()
+{
+    execute_index(m_iy);
+}
+
+void Z80::execute_index(PAIR16& idx)
+{
+    m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+    uint8_t op = fetch();
+
+    // Helper lambdas for index register access
+    // When reg field is 4(H) or 5(L), access IXH/IXL instead of H/L
+    auto read_idx_r8 = [&](int r) -> uint8_t {
+        switch (r & 7) {
+            case 0: return m_bc.b.h;
+            case 1: return m_bc.b.l;
+            case 2: return m_de.b.h;
+            case 3: return m_de.b.l;
+            case 4: return idx.b.h;  // IXH/IYH instead of H
+            case 5: return idx.b.l;  // IXL/IYL instead of L
+            case 6: {  // (IX+d)/(IY+d) -- displacement already fetched
+                // This should not be called for (IX+d) from here
+                return 0xFF;
+            }
+            case 7: return m_af.b.h;
+        }
+        return 0xFF;
+    };
+
+    switch (op) {
+        case 0x09: // ADD IX,BC
+            alu_add16(idx, m_bc.w);
+            eat(15);
+            return;
+
+        case 0x19: // ADD IX,DE
+            alu_add16(idx, m_de.w);
+            eat(15);
+            return;
+
+        case 0x21: // LD IX,nn
+            idx.w = fetch16();
+            eat(14);
+            return;
+
+        case 0x22: { // LD (nn),IX
+            uint16_t addr = fetch16();
+            mem_write(addr, idx.b.l);
+            mem_write(addr + 1, idx.b.h);
+            m_wz.w = addr + 1;
+            eat(20);
+            return;
+        }
+
+        case 0x23: // INC IX
+            idx.w++;
+            eat(10);
+            return;
+
+        case 0x24: // INC IXH
+            idx.b.h = alu_inc(idx.b.h);
+            eat(8);
+            return;
+
+        case 0x25: // DEC IXH
+            idx.b.h = alu_dec(idx.b.h);
+            eat(8);
+            return;
+
+        case 0x26: // LD IXH,n
+            idx.b.h = fetch();
+            eat(11);
+            return;
+
+        case 0x29: // ADD IX,IX
+            alu_add16(idx, idx.w);
+            eat(15);
+            return;
+
+        case 0x2A: { // LD IX,(nn)
+            uint16_t addr = fetch16();
+            idx.b.l = mem_read(addr);
+            idx.b.h = mem_read(addr + 1);
+            m_wz.w = addr + 1;
+            eat(20);
+            return;
+        }
+
+        case 0x2B: // DEC IX
+            idx.w--;
+            eat(10);
+            return;
+
+        case 0x2C: // INC IXL
+            idx.b.l = alu_inc(idx.b.l);
+            eat(8);
+            return;
+
+        case 0x2D: // DEC IXL
+            idx.b.l = alu_dec(idx.b.l);
+            eat(8);
+            return;
+
+        case 0x2E: // LD IXL,n
+            idx.b.l = fetch();
+            eat(11);
+            return;
+
+        case 0x34: { // INC (IX+d)
+            int8_t d = (int8_t)fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            uint8_t val = mem_read(addr);
+            val = alu_inc(val);
+            mem_write(addr, val);
+            eat(23);
+            return;
+        }
+
+        case 0x35: { // DEC (IX+d)
+            int8_t d = (int8_t)fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            uint8_t val = mem_read(addr);
+            val = alu_dec(val);
+            mem_write(addr, val);
+            eat(23);
+            return;
+        }
+
+        case 0x36: { // LD (IX+d),n
+            int8_t d = (int8_t)fetch();
+            uint8_t n = fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            mem_write(addr, n);
+            eat(19);
+            return;
+        }
+
+        case 0x39: // ADD IX,SP
+            alu_add16(idx, m_sp.w);
+            eat(15);
+            return;
+
+        // LD r,(IX+d) -- 0x46, 0x4E, 0x56, 0x5E, 0x66, 0x6E, 0x7E
+        case 0x46: case 0x4E: case 0x56: case 0x5E:
+        case 0x66: case 0x6E: case 0x7E: {
+            int8_t d = (int8_t)fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            int dst = (op >> 3) & 7;
+            // For dst 4,5 we write to the REAL H,L (not IXH/IXL)
+            write_r8(dst, mem_read(addr));
+            eat(19);
+            return;
+        }
+
+        // LD (IX+d),r -- 0x70-0x77 (except 0x76 which is HALT, handled as default)
+        case 0x70: case 0x71: case 0x72: case 0x73:
+        case 0x74: case 0x75: case 0x77: {
+            int8_t d = (int8_t)fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            int src = op & 7;
+            // For src 4,5 we read the REAL H,L
+            mem_write(addr, read_r8(src));
+            eat(19);
+            return;
+        }
+
+        // LD between IXH/IXL and registers (undocumented)
+        // 0x44=LD B,IXH  0x45=LD B,IXL  0x4C=LD C,IXH  0x4D=LD C,IXL
+        // 0x54=LD D,IXH  0x55=LD D,IXL  0x5C=LD E,IXH  0x5D=LD E,IXL
+        // 0x60=LD IXH,B  ... 0x67=LD IXH,A
+        // 0x68=LD IXL,B  ... 0x6F=LD IXL,A
+        // 0x7C=LD A,IXH  0x7D=LD A,IXL
+        case 0x44: case 0x45: case 0x4C: case 0x4D:
+        case 0x54: case 0x55: case 0x5C: case 0x5D:
+        case 0x7C: case 0x7D: {
+            // LD r, IXH/IXL (dst is normal reg, src is IXH or IXL)
+            int dst = (op >> 3) & 7;
+            int src = op & 7;
+            write_r8(dst, read_idx_r8(src));
+            eat(8);
+            return;
+        }
+
+        case 0x60: case 0x61: case 0x62: case 0x63:
+        case 0x64: case 0x65: case 0x67: {
+            // LD IXH, r
+            int src = op & 7;
+            idx.b.h = read_idx_r8(src);
+            eat(8);
+            return;
+        }
+
+        case 0x68: case 0x69: case 0x6A: case 0x6B:
+        case 0x6C: case 0x6D: case 0x6F: {
+            // LD IXL, r
+            int src = op & 7;
+            idx.b.l = read_idx_r8(src);
+            eat(8);
+            return;
+        }
+
+        // ALU A,(IX+d) -- 0x86, 0x8E, 0x96, 0x9E, 0xA6, 0xAE, 0xB6, 0xBE
+        case 0x86: case 0x8E: case 0x96: case 0x9E:
+        case 0xA6: case 0xAE: case 0xB6: case 0xBE: {
+            int8_t d = (int8_t)fetch();
+            uint16_t addr = idx.w + d;
+            m_wz.w = addr;
+            uint8_t val = mem_read(addr);
+            int alu_op = (op >> 3) & 7;
+            switch (alu_op) {
+                case 0: alu_add(val); break;
+                case 1: alu_adc(val); break;
+                case 2: alu_sub(val); break;
+                case 3: alu_sbc(val); break;
+                case 4: alu_and(val); break;
+                case 5: alu_xor(val); break;
+                case 6: alu_or(val);  break;
+                case 7: alu_cp(val);  break;
+            }
+            eat(19);
+            return;
+        }
+
+        // ALU A, IXH/IXL (undocumented)
+        case 0x84: case 0x85: case 0x8C: case 0x8D:
+        case 0x94: case 0x95: case 0x9C: case 0x9D:
+        case 0xA4: case 0xA5: case 0xAC: case 0xAD:
+        case 0xB4: case 0xB5: case 0xBC: case 0xBD: {
+            int src = op & 7;
+            uint8_t val = read_idx_r8(src);
+            int alu_op = (op >> 3) & 7;
+            switch (alu_op) {
+                case 0: alu_add(val); break;
+                case 1: alu_adc(val); break;
+                case 2: alu_sub(val); break;
+                case 3: alu_sbc(val); break;
+                case 4: alu_and(val); break;
+                case 5: alu_xor(val); break;
+                case 6: alu_or(val);  break;
+                case 7: alu_cp(val);  break;
+            }
+            eat(8);
+            return;
+        }
+
+        case 0xCB: // DDCB / FDCB prefix
+            execute_index_cb(idx);
+            return;
+
+        case 0xE1: // POP IX
+            idx.b.l = mem_read(m_sp.w++);
+            idx.b.h = mem_read(m_sp.w++);
+            eat(14);
+            return;
+
+        case 0xE3: { // EX (SP),IX
+            uint8_t lo = mem_read(m_sp.w);
+            uint8_t hi = mem_read(m_sp.w + 1);
+            mem_write(m_sp.w, idx.b.l);
+            mem_write(m_sp.w + 1, idx.b.h);
+            idx.b.l = lo;
+            idx.b.h = hi;
+            m_wz.w = idx.w;
+            eat(23);
+            return;
+        }
+
+        case 0xE5: // PUSH IX
+            mem_write(--m_sp.w, idx.b.h);
+            mem_write(--m_sp.w, idx.b.l);
+            eat(15);
+            return;
+
+        case 0xE9: // JP (IX)
+            m_pc.w = idx.w;
+            eat(8);
+            return;
+
+        case 0xF9: // LD SP,IX
+            m_sp.w = idx.w;
+            eat(10);
+            return;
+
+        default:
+            // Unrecognized DD/FD opcodes execute as unprefixed
+            // (the prefix is silently consumed)
+            execute_opcode(op);
+            return;
+    }
+}
+
+void Z80::execute_ddcb()
+{
+    execute_index_cb(m_ix);
+}
+
+void Z80::execute_fdcb()
+{
+    execute_index_cb(m_iy);
+}
+
+void Z80::execute_index_cb(PAIR16& idx)
+{
+    // Format: DD CB dd oo (displacement before opcode)
+    int8_t d = (int8_t)fetch();
+    uint8_t op = fetch();
+    uint16_t addr = idx.w + d;
+    m_wz.w = addr;
+    int reg = op & 7;  // undocumented: result also stored to this register
+    int bit = (op >> 3) & 7;
+    uint8_t val = mem_read(addr);
+
+    switch (op & 0xC0) {
+        case 0x00: { // Rotates and shifts on (IX+d)
+            uint8_t result;
+            switch (bit) {
+                case 0: result = (val @<< 1) | (val >> 7);
+                        m_af.b.l = (val >> 7) | szp_table[result]; break;
+                case 1: result = (val >> 1) | (val @<< 7);
+                        m_af.b.l = (val & CF) | szp_table[result]; break;
+                case 2: result = (val @<< 1) | (m_af.b.l & CF);
+                        m_af.b.l = (val >> 7) | szp_table[result]; break;
+                case 3: result = (val >> 1) | ((m_af.b.l & CF) @<< 7);
+                        m_af.b.l = (val & CF) | szp_table[result]; break;
+                case 4: result = val << 1;
+                        m_af.b.l = (val >> 7) | szp_table[result]; break;
+                case 5: result = (val >> 1) | (val & 0x80);
+                        m_af.b.l = (val & CF) | szp_table[result]; break;
+                case 6: result = (val << 1) | 0x01;
+                        m_af.b.l = (val >> 7) | szp_table[result]; break;
+                case 7: result = val >> 1;
+                        m_af.b.l = (val & CF) | szp_table[result]; break;
+                default: result = val; break;
+            }
+            mem_write(addr, result);
+            // Undocumented: also store to register (unless reg == 6)
+            if (reg != 6) write_r8(reg, result);
+            m_q = m_af.b.l;
+            eat(23);
+            break;
+        }
+
+        case 0x40: { // BIT b,(IX+d)
+            uint8_t result = val & (1 << bit);
+            m_af.b.l = (m_af.b.l & CF) | HF |
+                       (result ? (result & SF) : (ZF | PF)) |
+                       (m_wz.b.h & (YF | XF));
+            m_q = m_af.b.l;
+            eat(20);
+            break;
+        }
+
+        case 0x80: { // RES b,(IX+d)
+            uint8_t result = val & ~(1 << bit);
+            mem_write(addr, result);
+            if (reg != 6) write_r8(reg, result);
+            eat(23);
+            break;
+        }
+
+        case 0xC0: { // SET b,(IX+d)
+            uint8_t result = val | (1 << bit);
+            mem_write(addr, result);
+            if (reg != 6) write_r8(reg, result);
+            eat(23);
+            break;
+        }
+    }
+}
+@
+
+\section{Interrupt Handling}
+
+The Z80 supports two interrupt types:
+\begin{itemize}
+\item \textbf{NMI}: non-maskable, always jumps to 0x0066. Clears IFF1 only.
+\item \textbf{IRQ}: maskable, behavior depends on interrupt mode (IM 0/1/2).
+\end{itemize}
+
+NMI has priority over IRQ. Both un-halt the CPU.
+
+<<z80 interrupt handling>>=
+void Z80::irq(uint8_t vector)
+{
+    m_irq_pending = true;
+    m_irq_vector = vector;
+}
+
+void Z80::nmi()
+{
+    m_nmi_pending = true;
+}
+
+void Z80::handle_interrupts()
+{
+    if (m_nmi_pending) {
+        m_nmi_pending = false;
+        m_halted = false;
+        m_iff2 = m_iff1;  // preserve IFF1 in IFF2
+        m_iff1 = 0;
+        mem_write(--m_sp.w, m_pc.b.h);
+        mem_write(--m_sp.w, m_pc.b.l);
+        m_pc.w = 0x0066;
+        m_wz.w = 0x0066;
+        m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+        eat(11);
+        return;
+    }
+
+    if (m_irq_pending && m_iff1) {
+        m_irq_pending = false;
+        m_halted = false;
+        m_iff1 = 0;
+        m_iff2 = 0;
+        m_r = (m_r & 0x80) | ((m_r + 1) & 0x7F);
+
+        switch (m_im) {
+            case 0: {
+                // IM 0: Execute instruction from data bus
+                // Common case: RST vector on bus
+                uint8_t vec = m_irq_vector;
+                if ((vec & 0xC7) == 0xC7) {
+                    // RST instruction: push PC, jump to vector address
+                    mem_write(--m_sp.w, m_pc.b.h);
+                    mem_write(--m_sp.w, m_pc.b.l);
+                    m_pc.w = vec & 0x38;
+                    m_wz.w = m_pc.w;
+                    eat(13);
+                } else {
+                    // Non-RST vector: treat as call to the vector address
+                    // Berzerk uses 0xFC which doesn't match RST pattern
+                    // 0xFC = CALL nn -- but the nn isn't on the bus
+                    // Actually, for single-byte vectors that aren't RST,
+                    // execute them as instructions
+                    mem_write(--m_sp.w, m_pc.b.h);
+                    mem_write(--m_sp.w, m_pc.b.l);
+                    m_pc.w = vec & 0x38;
+                    m_wz.w = m_pc.w;
+                    eat(13);
+                }
+                break;
+            }
+
+            case 1:
+                // IM 1: RST 38h
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = 0x0038;
+                m_wz.w = 0x0038;
+                eat(13);
+                break;
+
+            case 2: {
+                // IM 2: Vector table lookup
+                uint16_t vec_addr = (m_i << 8) | (m_irq_vector & 0xFE);
+                uint16_t target = mem_read(vec_addr) |
+                                  (mem_read(vec_addr + 1) << 8);
+                mem_write(--m_sp.w, m_pc.b.h);
+                mem_write(--m_sp.w, m_pc.b.l);
+                m_pc.w = target;
+                m_wz.w = target;
+                eat(19);
+                break;
+            }
+        }
+    }
+}
+@
+
+\end{document}

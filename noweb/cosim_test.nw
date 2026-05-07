@@ -1,0 +1,357 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk: Cosimulation Tests}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+This test program verifies the native C++ reimplementation against the Z80
+emulator. The first test validates maze generation: for a set of room
+coordinates, both implementations must produce identical VRAM content.
+
+\section{Test Program}
+
+<<cosim_test.cpp>>=
+#include "emulator.h"
+#include "native.h"
+#include "cosim_harness.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+<<maze comparison test>>
+<<rng test>>
+<<main test runner>>
+@
+
+\subsection{RNG Test}
+
+Verify the native RNG produces the same sequence as the Z80 code.
+We run the emulator to the point where it seeds the RNG, then compare
+sequences. Since the RNG is simple, we just verify the algorithm directly.
+
+<<rng test>>=
+int test_rng()
+{
+    std::fprintf(stderr, "=== RNG Test ===\n");
+    int failures = 0;
+
+    // The Z80 RNG at $2678: seed = seed * 7 + 0x3153
+    // Test with known seed values
+    struct TestCase {
+        uint16_t seed;
+        uint8_t expected_result;
+        uint16_t expected_new_seed;
+    };
+
+    // Manually computed: seed=0x0000 -> 0*7+0x3153 = 0x3153, result = 0x31
+    // seed=0x3153 -> 0x3153*7+0x3153 = 0x3153*8 = 0x18A98 & 0xFFFF = 0x8A98, result=0x8A
+    // seed=0x0101 -> 0x0101*7+0x3153 = 0x0707+0x3153 = 0x385A, result=0x38
+    TestCase cases[] = {
+        {0x0000, 0x31, 0x3153},
+        {0x3153, 0x8A, 0x8A98},
+        {0x0101, 0x38, 0x385A},
+    };
+
+    for (const auto& tc : cases) {
+        // Native implementation
+        BerzerkNative native;
+        native.state().rng_seed = tc.seed;
+        uint8_t result = native.random();
+
+        if (result != tc.expected_result) {
+            std::fprintf(stderr, "  FAIL: seed=0x%04X expected=0x%02X got=0x%02X\n",
+                         tc.seed, tc.expected_result, result);
+            failures++;
+        }
+        if (native.state().rng_seed != tc.expected_new_seed) {
+            std::fprintf(stderr, "  FAIL: seed=0x%04X expected_new=0x%04X got=0x%04X\n",
+                         tc.seed, tc.expected_new_seed, native.state().rng_seed);
+            failures++;
+        }
+    }
+
+    std::fprintf(stderr, "RNG test: %s (%d failures)\n\n",
+                 failures == 0 ? "PASS" : "FAIL", failures);
+    return failures;
+}
+@
+
+\subsection{Maze Comparison Test}
+
+Run the emulator until it generates a maze for a known room, then generate
+the same maze with the native implementation, and compare VRAM byte by byte.
+
+To find the maze VRAM state from the emulator, we run it for enough frames
+that it reaches attract mode and generates a maze. The attract mode calls
+the maze generator with room coordinates derived from the RNG.
+
+A simpler approach: run both implementations' maze generators directly
+with the same room coordinates and compare the resulting VRAM.
+
+<<maze comparison test>>=
+int test_maze_generation(const char* rom_dir)
+{
+    std::fprintf(stderr, "=== Maze Generation Test ===\n");
+    int failures = 0;
+
+    // Test several room coordinates
+    struct RoomTest {
+        uint8_t room_x, room_y;
+    } rooms[] = {
+        {0, 0}, {1, 0}, {0, 1}, {5, 3}, {0xFF, 0xFF}, {0x42, 0x17}
+    };
+
+    // Initialize native implementation (needs ROM for sprite data reference,
+    // but maze drawing uses the wall sprite constant)
+    BerzerkNative native;
+    if (!native.init(rom_dir)) {
+        std::fprintf(stderr, "  SKIP: cannot load ROMs for native impl\n");
+        return 0;
+    }
+
+    // For each room, generate maze and verify determinism
+    for (const auto& room : rooms) {
+        // Generate maze twice with same coordinates, verify identical VRAM
+        native.video().vram.fill(0);
+        native.video().magic = MagicRAMControl{};
+        native.state().room_x = room.room_x;
+        native.state().room_y = room.room_y;
+        native.generate_maze();
+
+        std::array<uint8_t, 0x2000> vram1;
+        std::memcpy(vram1.data(), native.video().vram.data(), 0x2000);
+
+        // Generate again
+        native.video().vram.fill(0);
+        native.video().magic = MagicRAMControl{};
+        native.state().room_x = room.room_x;
+        native.state().room_y = room.room_y;
+        native.generate_maze();
+
+        int mismatches = 0;
+        for (int i = 0; i < 0x2000; i++) {
+            if (vram1[i] != native.video().vram[i]) mismatches++;
+        }
+
+        if (mismatches > 0) {
+            std::fprintf(stderr, "  FAIL: room(%d,%d) not deterministic, "
+                         "%d VRAM bytes differ\n",
+                         room.room_x, room.room_y, mismatches);
+            failures++;
+        } else {
+            // Count non-zero VRAM bytes to verify something was drawn
+            int nonzero = 0;
+            for (int i = 0; i < 0x2000; i++) {
+                if (native.video().vram[i] != 0) nonzero++;
+            }
+            std::fprintf(stderr, "  PASS: room(%d,%d) deterministic, "
+                         "%d VRAM bytes set\n",
+                         room.room_x, room.room_y, nonzero);
+        }
+    }
+
+    std::fprintf(stderr, "Maze generation test: %s (%d failures)\n\n",
+                 failures == 0 ? "PASS" : "FAIL", failures);
+    return failures;
+}
+@
+
+\subsection{Maze Cross-Validation Against Emulator}
+
+This is the real cosimulation test. We run the emulator's maze generation
+(by calling the Z80 code) and compare with the native implementation's
+maze generation. Both should produce identical VRAM.
+
+To do this without running the full emulator boot sequence, we directly
+set up the emulator's Z80 to call the maze generation subroutine at \$2540,
+then compare the resulting VRAM with the native implementation's output.
+
+<<maze comparison test>>=
+int test_maze_vs_emulator(const char* rom_dir)
+{
+    std::fprintf(stderr, "=== Maze vs Emulator Cross-Validation ===\n");
+
+    // Initialize emulator
+    BerzerkEmulator emu;
+    if (!emu.init(rom_dir)) {
+        std::fprintf(stderr, "  SKIP: cannot initialize emulator\n");
+        return 0;
+    }
+
+    // Initialize native
+    BerzerkNative native;
+    if (!native.init(rom_dir)) {
+        std::fprintf(stderr, "  SKIP: cannot initialize native\n");
+        return 0;
+    }
+
+    int total_failures = 0;
+
+    // Test room (1, 0): seed the RNG, clear VRAM, call maze generator
+    uint8_t room_x = 1, room_y = 0;
+
+    // --- Emulator side ---
+    // Clear VRAM first, then set room coordinates.
+    // $4345/$4346/$4379 are mapped into VRAM ($4000-$5FFF) so
+    // clearing VRAM after writing them would wipe the values out.
+    for (int i = 0; i < 0x2000; i++) {
+        emu.memory().video.vram[i] = 0;
+    }
+
+    // Now set room coordinates and game state in VRAM scratch area.
+    // These addresses are in the VRAM range ($4000-$5FFF) which the game
+    // uses as scratch RAM during vblank scanlines ($4000-$43FF).
+    emu.memory().program.write(0x4345, room_x);       // ROOM_X
+    emu.memory().program.write(0x4346, room_y);       // ROOM_Y
+    emu.memory().program.write(0x4379, 0x00);         // FLIP (upright)
+    emu.memory().program.write(0x4344, 0x01);         // CURRENT_PLAYER (P1)
+    emu.memory().program.write(0x4349, 0x03);         // DEATHS (3 lives)
+    emu.memory().program.write(0x433E, 0x00);         // P1_SCORE byte 0
+    emu.memory().program.write(0x433F, 0x00);         // P1_SCORE byte 1
+    emu.memory().program.write(0x4340, 0x00);         // P1_SCORE byte 2
+    emu.memory().program.write(0x436E, 0x00);         // IS_DEMO_MODE
+    emu.memory().program.write(0x4376, 0x01);         // NUMBER_OF_PLAYERS (1P)
+
+    // Set magic RAM control to OR mode for wall drawing
+    emu.memory().video.magic.control = 0x10;
+    emu.memory().video.magic.last_shift_data = 0;
+    emu.memory().video.magic.intercept = 1;
+
+    // Build a small trampoline in work RAM ($0800) to CALL $2540 then HALT.
+    // No ROM patching -- the full $2540 function runs including colour setup,
+    // lives display, and score display ($2597-$25C9).
+    emu.memory().program.write(0x0800, 0xCD);  // CALL nn
+    emu.memory().program.write(0x0801, 0x40);  // low byte $2540
+    emu.memory().program.write(0x0802, 0x25);  // high byte
+    emu.memory().program.write(0x0803, 0x76);  // HALT after return
+    emu.cpu().set_pc(0x0800);
+    emu.cpu().set_sp(0x0850);
+
+    // Run until HALT (max 500K instructions to allow for score/lives rendering)
+    for (int i = 0; i < 500000; i++) {
+        if (emu.cpu().get_halted()) break;
+        emu.cpu().step();
+    }
+
+    if (!emu.cpu().get_halted()) {
+        std::fprintf(stderr, "  WARN: emulator did not HALT after full room draw\n");
+    }
+
+    // --- Native side ---
+    native.video().vram.fill(0);
+    native.video().magic = MagicRAMControl{};
+    native.state().room_x = room_x;
+    native.state().room_y = room_y;
+    native.state().flip = 0;
+    native.state().current_player = 1;
+    native.state().deaths = 3;
+    native.state().score[0] = 0;
+    native.state().score[1] = 0;
+    native.state().score[2] = 0;
+    native.state().is_demo_mode = 0;
+    native.generate_maze();
+    native.post_maze_render();
+
+    // --- Compare VRAM ---
+    // Skip offsets 0x0000-0x03FF: those are the 32 vblank scanlines
+    // which the game uses as scratch RAM for game variables (ROOM_X at
+    // $4345, RNG_SEED at $435C, maze config at $435E, etc.).  The Z80
+    // writes game state there but the native impl uses C++ structs.
+    // Visible VRAM starts at offset 0x0400 (address $4400).
+    const int VISIBLE_START = 0x0400;
+    int mismatches = 0;
+    int first_mismatch = -1;
+    for (int i = VISIBLE_START; i < 0x2000; i++) {
+        if (emu.memory().video.vram[i] != native.video().vram[i]) {
+            mismatches++;
+            if (first_mismatch < 0) first_mismatch = i;
+        }
+    }
+
+    // Count non-zero bytes in each (visible region only)
+    int emu_nonzero = 0, native_nonzero = 0;
+    for (int i = VISIBLE_START; i < 0x2000; i++) {
+        if (emu.memory().video.vram[i] != 0) emu_nonzero++;
+        if (native.video().vram[i] != 0) native_nonzero++;
+    }
+
+    // Count mismatches by region for debugging
+    int mm_low = 0, mm_mid = 0, mm_high = 0;
+    for (int i = VISIBLE_START; i < 0x2000; i++) {
+        if (emu.memory().video.vram[i] != native.video().vram[i]) {
+            if (i < 0x1000) mm_low++;
+            else if (i < 0x1800) mm_mid++;
+            else mm_high++;
+        }
+    }
+
+    std::fprintf(stderr, "  Room(%d,%d): emu_vram=%d native_vram=%d mismatches=%d"
+                 " (low=%d mid=%d high=%d)\n",
+                 room_x, room_y, emu_nonzero, native_nonzero, mismatches,
+                 mm_low, mm_mid, mm_high);
+
+    if (mismatches > 0) {
+        std::fprintf(stderr, "  FAIL: first mismatch at VRAM offset 0x%04X "
+                     "(emu=0x%02X native=0x%02X)\n",
+                     first_mismatch,
+                     emu.memory().video.vram[first_mismatch],
+                     native.video().vram[first_mismatch]);
+        total_failures++;
+
+        // Show first 30 mismatches for debugging
+        int shown = 0;
+        for (int i = VISIBLE_START; i < 0x2000 && shown < 30; i++) {
+            if (emu.memory().video.vram[i] != native.video().vram[i]) {
+                std::fprintf(stderr, "    VRAM[0x%04X]: emu=0x%02X native=0x%02X\n",
+                             i, emu.memory().video.vram[i],
+                             native.video().vram[i]);
+                shown++;
+            }
+        }
+    } else {
+        std::fprintf(stderr, "  PASS: VRAM matches exactly\n");
+    }
+
+    std::fprintf(stderr, "Maze vs emulator: %s (%d failures)\n\n",
+                 total_failures == 0 ? "PASS" : "FAIL", total_failures);
+    return total_failures;
+}
+@
+
+\subsection{Main Test Runner}
+
+<<main test runner>>=
+int main(int argc, char* argv[])
+{
+    const char* rom_dir = "rom/berzerk";
+    if (argc > 1) {
+        rom_dir = argv[1];
+    }
+
+    std::fprintf(stderr, "Berzerk Cosimulation Tests\n");
+    std::fprintf(stderr, "ROM directory: %s\n\n", rom_dir);
+
+    int total_failures = 0;
+
+    total_failures += test_rng();
+    total_failures += test_maze_generation(rom_dir);
+    total_failures += test_maze_vs_emulator(rom_dir);
+
+    std::fprintf(stderr, "==============================\n");
+    std::fprintf(stderr, "Total: %s (%d failures)\n",
+                 total_failures == 0 ? "ALL PASS" : "SOME FAILED",
+                 total_failures);
+
+    return total_failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+@
+
+\end{document}

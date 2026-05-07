@@ -1,0 +1,288 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: SDL Platform Layer}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The platform layer abstracts SDL2 for window creation, input polling, and
+framebuffer presentation.  It is designed to work unchanged under both
+native SDL2 and Emscripten's SDL2 port (which maps calls to HTML5 Canvas
+and WebGL).
+
+The display window is 256x256 pixels scaled by a configurable factor
+(default 3x).  Only 224 of the 256 scanlines are visible (lines 32--255);
+the source rect for [[SDL\_RenderCopy]] crops accordingly.
+
+Input is mapped to three I/O port bytes matching the Berzerk hardware's
+active-low convention: all bits default to 1 (0xFF), and a pressed key
+clears the corresponding bit.
+
+\section{Header}
+
+<<platform.h>>=
+#ifndef BERZERK_PLATFORM_H
+#define BERZERK_PLATFORM_H
+
+#include <cstdint>
+
+struct SDL_Window;
+struct SDL_Renderer;
+struct SDL_Texture;
+
+<<input state struct>>
+<<platform config struct>>
+<<platform handles struct>>
+<<platform function declarations>>
+
+#endif // BERZERK_PLATFORM_H
+@
+
+\section{Data Structures}
+
+\subsection{Input State}
+
+Three bytes representing the three input ports.  All bits are active-low:
+0xFF means no buttons pressed.  When a key is held, the corresponding bit
+is cleared to 0.
+
+\begin{itemize}
+\item \textbf{port\_48} (P1 joystick + fire): bits 0--3 = directions, bit 4 = fire
+\item \textbf{port\_49} (system): bit 0 = 1P start, bit 1 = 2P start, bit 7 = coin
+\item \textbf{port\_4a} (P2 joystick + fire): same layout as P1
+\end{itemize}
+
+<<input state struct>>=
+struct InputState {
+    uint8_t port_48 = 0xFF;  // P1: L=0, R=1, U=2, D=3, Fire=4
+    uint8_t port_49 = 0xFF;  // System: 1P=0, 2P=1, Coin1=7
+    uint8_t port_4a = 0xFF;  // P2: same layout as P1
+};
+@
+
+\subsection{Platform Configuration}
+
+<<platform config struct>>=
+struct PlatformConfig {
+    int scale = 3;            // window scale factor
+    const char* title = "Berzerk";
+};
+@
+
+\subsection{Platform Handles}
+
+Opaque handles to SDL resources.  These are passed between platform
+functions but never accessed by emulator code directly.
+
+<<platform handles struct>>=
+struct PlatformHandles {
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    SDL_Texture* texture = nullptr;
+};
+@
+
+\section{Function Declarations}
+
+<<platform function declarations>>=
+// Initialize SDL window, renderer, and streaming texture.
+// Returns true on success, false on failure (error printed to stderr).
+bool platform_init(const PlatformConfig& config, PlatformHandles& handles);
+
+// Destroy SDL resources and quit SDL.
+void platform_shutdown(PlatformHandles& handles);
+
+// Poll SDL events and update input state.
+// Returns false if the user requested quit (SDL_QUIT or Escape).
+bool poll_input(InputState& input);
+
+// Upload the 256x256 RGBA framebuffer to the SDL texture.
+void update_texture(SDL_Texture* texture, const uint32_t* framebuffer);
+
+// Present the texture to screen, cropping to visible scanlines (32--255).
+void present_frame(SDL_Renderer* renderer, SDL_Texture* texture);
+@
+
+\section{Implementation}
+
+<<platform.cpp>>=
+#include "platform.h"
+#include <SDL.h>
+#include <cstdio>
+
+<<platform init implementation>>
+<<platform shutdown implementation>>
+<<poll input implementation>>
+<<update texture implementation>>
+<<present frame implementation>>
+@
+
+\subsection{Initialization}
+
+Create an SDL window at the configured scale, with a renderer that uses
+vsync for frame pacing.  The texture is 256x256 pixels, streaming mode,
+RGBA8888 pixel format.
+
+<<platform init implementation>>=
+bool platform_init(const PlatformConfig& config, PlatformHandles& handles)
+{
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return false;
+    }
+
+    int w = 256 * config.scale;
+    int h = 224 * config.scale;  // visible area only
+
+    handles.window = SDL_CreateWindow(
+        config.title,
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        w, h,
+        SDL_WINDOW_SHOWN
+    );
+    if (!handles.window) {
+        std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return false;
+    }
+
+    handles.renderer = SDL_CreateRenderer(
+        handles.window, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+    );
+    if (!handles.renderer) {
+        std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        SDL_DestroyWindow(handles.window);
+        SDL_Quit();
+        return false;
+    }
+
+    // 256x256 texture (full framebuffer including vblank lines)
+    handles.texture = SDL_CreateTexture(
+        handles.renderer,
+        SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        256, 256
+    );
+    if (!handles.texture) {
+        std::fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(handles.renderer);
+        SDL_DestroyWindow(handles.window);
+        SDL_Quit();
+        return false;
+    }
+
+    return true;
+}
+@
+
+\subsection{Shutdown}
+
+<<platform shutdown implementation>>=
+void platform_shutdown(PlatformHandles& handles)
+{
+    if (handles.texture) {
+        SDL_DestroyTexture(handles.texture);
+        handles.texture = nullptr;
+    }
+    if (handles.renderer) {
+        SDL_DestroyRenderer(handles.renderer);
+        handles.renderer = nullptr;
+    }
+    if (handles.window) {
+        SDL_DestroyWindow(handles.window);
+        handles.window = nullptr;
+    }
+    SDL_Quit();
+}
+@
+
+\subsection{Input Polling}
+
+Poll all pending SDL events and then sample the keyboard state.  Each
+mapped key clears the corresponding bit in the active-low port bytes.
+
+The keyboard state is sampled after event processing to get the current
+state of all keys, rather than tracking individual key-down/key-up events.
+This is simpler and matches how the real hardware reads port state (it
+samples the button lines at the moment of the IN instruction).
+
+<<poll input implementation>>=
+bool poll_input(InputState& input)
+{
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            return false;
+        }
+    }
+
+    const uint8_t* keys = SDL_GetKeyboardState(nullptr);
+
+    // Escape quits
+    if (keys[SDL_SCANCODE_ESCAPE]) {
+        return false;
+    }
+
+    // Start with all bits high (no buttons pressed)
+    input.port_48 = 0xFF;
+    input.port_49 = 0xFF;
+    input.port_4a = 0xFF;
+
+    // P1 controls -> port 0x48
+    if (keys[SDL_SCANCODE_LEFT])   input.port_48 &= ~0x01;  // bit 0: left
+    if (keys[SDL_SCANCODE_RIGHT])  input.port_48 &= ~0x02;  // bit 1: right
+    if (keys[SDL_SCANCODE_UP])     input.port_48 &= ~0x04;  // bit 2: up
+    if (keys[SDL_SCANCODE_DOWN])   input.port_48 &= ~0x08;  // bit 3: down
+    if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_SPACE]) {
+        input.port_48 &= ~0x10;  // bit 4: fire
+    }
+
+    // System controls -> port 0x49
+    if (keys[SDL_SCANCODE_1])  input.port_49 &= ~0x01;  // bit 0: 1P start
+    if (keys[SDL_SCANCODE_2])  input.port_49 &= ~0x02;  // bit 1: 2P start
+    if (keys[SDL_SCANCODE_5])  input.port_49 &= ~0x80;  // bit 7: coin 1
+
+    return true;
+}
+@
+
+\subsection{Texture Upload}
+
+Upload the 256x256 RGBA framebuffer to the SDL streaming texture.
+Each pixel is a 32-bit value packed as 0xRRGGBBAA.
+
+<<update texture implementation>>=
+void update_texture(SDL_Texture* texture, const uint32_t* framebuffer)
+{
+    SDL_UpdateTexture(texture, nullptr, framebuffer, 256 * sizeof(uint32_t));
+}
+@
+
+\subsection{Frame Presentation}
+
+Render the texture to screen, cropping to visible scanlines 32--255
+(224 lines).  The source rect selects those lines from the 256-line
+texture.  The destination is the full window.
+
+<<present frame implementation>>=
+void present_frame(SDL_Renderer* renderer, SDL_Texture* texture)
+{
+    SDL_RenderClear(renderer);
+
+    // Source rect: skip the 32 vblank lines at the top, show 224 visible lines
+    SDL_Rect src = { 0, 32, 256, 224 };
+    SDL_RenderCopy(renderer, texture, &src, nullptr);
+
+    SDL_RenderPresent(renderer);
+}
+@
+
+\end{document}

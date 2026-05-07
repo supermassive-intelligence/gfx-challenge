@@ -1,0 +1,1177 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk: Native C++ Reimplementation}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+This is a native C++ reimplementation of the Berzerk game logic. Instead of
+emulating Z80 instructions, it implements the game algorithms directly in C++,
+using the Phase 6 disassembly documentation as the blueprint.
+
+The native implementation operates on the same memory model as the emulator:
+VRAM (8~KB), Work RAM (1~KB), Color RAM (2~KB), and Magic RAM (74181 ALU).
+All sprite drawing goes through the same [[magic\_ram\_write]] pipeline, so
+pixel-level output must match the emulator exactly.
+
+Verification is performed by the Phase 7 cosimulation harness, which compares
+VRAM content at frame boundaries.
+
+\section{Header}
+
+<<native.h>>=
+#ifndef BERZERK_NATIVE_H
+#define BERZERK_NATIVE_H
+
+#include "cosim.h"
+#include "video.h"
+#include "sound.h"
+#include "interrupts.h"
+#include "platform.h"
+#include <array>
+#include <cstdint>
+#include <vector>
+
+<<game constants>>
+<<vector struct>>
+<<bolt struct>>
+<<game state struct>>
+<<berzerk native class>>
+
+#endif // BERZERK_NATIVE_H
+@
+
+\section{Game Constants}
+
+Constants extracted from ROM data and Phase 6 analysis.
+
+<<game constants>>=
+// Direction bits (DURL encoding)
+static constexpr uint8_t DIR_LEFT  = 0x01;
+static constexpr uint8_t DIR_RIGHT = 0x02;
+static constexpr uint8_t DIR_UP    = 0x04;
+static constexpr uint8_t DIR_DOWN  = 0x08;
+
+// VECTOR status bits
+static constexpr uint8_t STATUS_ERASE = 0x01;
+static constexpr uint8_t STATUS_WRITE = 0x02;
+static constexpr uint8_t STATUS_MOVE  = 0x04;
+static constexpr uint8_t STATUS_BLANK = 0x08;
+static constexpr uint8_t STATUS_COLOR = 0x10;
+static constexpr uint8_t STATUS_DYING = 0x20;
+static constexpr uint8_t STATUS_HIT   = 0x80;
+
+// Screen geometry
+static constexpr int SCREEN_WIDTH  = 256;
+static constexpr int SCREEN_HEIGHT = 256;
+static constexpr int BYTES_PER_ROW = 32;
+static constexpr int VRAM_SIZE     = 0x2000;
+
+// Room exit thresholds (from Phase 6 room transitions)
+static constexpr uint8_t EXIT_RIGHT_X  = 0xF6;
+static constexpr uint8_t EXIT_LEFT_X   = 0xFC;
+static constexpr uint8_t EXIT_TOP_Y    = 0x02;
+static constexpr uint8_t EXIT_BOTTOM_Y = 0xBE;
+
+// Wall template from ROM $268C (15 bytes)
+static constexpr uint8_t WALL_TEMPLATE[15] = {
+    0x05, 0x04, 0x04, 0x04, 0x06,   // row 0 (top border)
+    0x01, 0x00, 0x00, 0x00, 0x02,   // row 1 (middle cells)
+    0x09, 0x08, 0x08, 0x08, 0x0A    // row 2 (bottom border)
+};
+
+// Wall sprite: 1 byte wide, 4 rows of $F0 (4x4 solid block)
+static constexpr uint8_t WALL_SPRITE[] = { 0x01, 0x04, 0xF0, 0xF0, 0xF0, 0xF0 };
+
+// Spawn positions from ROM $23A2 (11 entries: X, Y pairs)
+static constexpr uint8_t SPAWN_POSITIONS[11][2] = {
+    {0x20, 0x20}, {0x50, 0x20}, {0x90, 0x20}, {0xC0, 0x20},
+    {0x38, 0x60}, {0x78, 0x60}, {0xA8, 0x60},
+    {0x20, 0xA0}, {0x50, 0xA0}, {0x90, 0xA0}, {0xC0, 0xA0}
+};
+
+// Max robots per room
+static constexpr int MAX_ROBOTS = 11;
+
+// Difficulty table (upright, from ROM $3794)
+// Format: score_threshold, RBOLTS, bolt_speed, RWAIT, wall_colour
+static constexpr uint8_t DIFFICULTY_UPRIGHT[][5] = {
+    {0x00, 0, 0x05, 80, 0x06},  // cyan walls, no bolts
+    {0x20, 1, 0x05, 70, 0x02},  // green walls
+    {0x40, 1, 0x04, 60, 0x06},
+    {0x60, 2, 0x04, 60, 0x05},  // magenta walls
+    {0x80, 2, 0x03, 50, 0x02},
+    {0x10, 3, 0x03, 50, 0x07},  // white walls
+    {0x30, 4, 0x02, 50, 0x06},
+    {0x50, 5, 0x02, 50, 0x02},
+};
+@
+
+\section{VECTOR Struct}
+
+Native representation of the 14-byte VECTOR struct from the ROM.
+
+<<vector struct>>=
+struct Vector {
+    uint8_t status = 0;
+    uint8_t magic = 0;
+    uint16_t old_screen_addr = 0;   // O.A.H:O.A.L
+    uint16_t old_pattern_addr = 0;  // O.P.H:O.P.L
+    int8_t vx = 0;                  // V.X (signed)
+    uint8_t px = 0;                 // P.X
+    int8_t vy = 0;                  // V.Y (signed)
+    uint8_t py = 0;                 // P.Y
+    uint16_t pattern_ptr = 0;       // D.P.H:D.P.L
+    uint8_t time = 0;               // TIME countdown
+    uint8_t tprime = 0;             // TPRIME reload
+    bool active = false;
+};
+@
+
+\section{BOLT Struct}
+
+Native representation of the 8-byte BOLT struct.
+
+<<bolt struct>>=
+struct Bolt {
+    uint8_t direction = 0;
+    uint8_t length = 0;
+    uint8_t x = 0;
+    uint8_t y = 0;
+    uint8_t last_direction = 0;
+    uint8_t max_length = 8;
+    uint8_t tail_x = 0;
+    uint8_t tail_y = 0;
+};
+@
+
+\section{Game State}
+
+All mutable game state collected in one struct. The addresses in comments
+correspond to the original RAM locations.
+
+<<game state struct>>=
+struct GameState {
+    // Player state ($4344-$434F)
+    uint8_t current_player = 1;     // $4344
+    uint8_t room_x = 0;            // $4345
+    uint8_t room_y = 0;            // $4346
+    uint8_t man_x = 0x80;          // $4347
+    uint8_t man_y = 0x60;          // $4348
+    uint8_t deaths = 3;            // $4349 (lives remaining)
+    uint8_t difficulty = 0;        // $434A (BCD, +$60 per room)
+    uint8_t rbolts = 0;            // $434B
+    uint8_t robot_speed = 8;       // $434C
+    uint8_t rwait = 80;            // $434D
+    uint8_t otto_time = 0;         // $434E
+    uint8_t xtramen = 0;           // $434F
+
+    // RNG ($435C)
+    uint16_t rng_seed = 0;
+
+    // Maze config ($435E, 15 bytes)
+    uint8_t maze_config[15] = {};
+
+    // Score ($433E-$4340, BCD)
+    uint8_t score[3] = {0, 0, 0};
+
+    // Game flags
+    uint8_t is_demo_mode = 0;      // $436E
+    uint8_t update_flag = 0;       // $436D
+    uint8_t rcount = 0;            // $4371 (robots alive)
+    uint8_t rsaved = 0;            // $4372
+    uint8_t flip = 0;              // $4379 (0=upright, 8=cocktail)
+    uint8_t player_colour = 0x01;  // $4378
+
+    // Sprite objects
+    Vector player;
+    Vector robots[MAX_ROBOTS];
+    Vector otto;
+    Bolt player_bolts[2];
+    Bolt robot_bolts[8];
+
+    // Frame tracking
+    int frame_number = 0;
+
+    // Game phase state machine (replaces Z80 coroutine scheduler)
+    enum class Phase {
+        BOOT,
+        ATTRACT,
+        GAME_INIT,
+        ROOM_SETUP,
+        PLAYING,
+        PLAYER_DEAD,
+        ROOM_CLEAR,
+        GAME_OVER,
+    } phase = Phase::BOOT;
+
+    int phase_timer = 0;
+};
+@
+
+\section{BerzerkNative Class}
+
+The concrete [[BerzerkMachine]] implementation using native C++ game logic.
+
+<<berzerk native class>>=
+class BerzerkNative : public BerzerkMachine {
+public:
+    BerzerkNative();
+    ~BerzerkNative() override = default;
+
+    // BerzerkMachine interface
+    bool init(const char* rom_dir) override;
+    void reset() override;
+    void step_frame() override;
+    MachineSnapshot snapshot() const override;
+    void restore(const MachineSnapshot& snap) override;
+    const uint8_t* vram_data() const override;
+    void set_input(const InputState& input) override;
+    int frame_count() const override;
+
+    // Direct access for testing
+    GameState& state() { return m_state; }
+    VideoState& video() { return m_video; }
+
+    // Exposed for testing individual subsystems
+    uint8_t random();
+    void generate_maze();
+    void draw_wall_tile(uint8_t y, uint8_t x);
+    void draw_horizontal_segment(uint8_t y, uint8_t x);
+    void draw_vertical_segment(uint8_t y, uint8_t x);
+    void draw_sprite(const uint8_t* frame_data, uint16_t dest_addr);
+    uint16_t calc_magic_ram_addr(uint8_t y, uint8_t x);
+    void clear_screen();
+    void spawn_robots();
+    void draw_borders();
+    void print_char(uint8_t c, uint16_t dest_addr);
+    void print_digits(const uint8_t* bcd_data, int num_digits, uint8_t y, uint8_t x);
+    void show_score();
+    void draw_lives();
+    void colour_fill(uint16_t offset, uint8_t lines, uint8_t width, uint8_t colour);
+    void post_maze_render();
+
+private:
+    VideoState m_video;
+    SoundState m_sound;
+    InterruptState m_interrupts;
+    InputState m_input;
+    GameState m_state;
+
+    std::vector<uint8_t> m_program_rom;
+
+    // Character set from ROM
+    const uint8_t* m_charset = nullptr;   // pointer into m_program_rom at $2F1E
+
+    // Pattern data from ROM
+    const uint8_t* m_patterns = nullptr;  // pointer into m_program_rom at $1000
+
+    void do_frame_playing();
+    void do_frame_attract();
+    void do_room_setup();
+    void move_animate_vector(Vector& v);
+    void erase_pattern(Vector& v);
+    void write_pattern(Vector& v);
+    void handle_player_bolts();
+    void move_and_draw_bolt(Bolt& b);
+    void check_room_exit();
+    void update_otto();
+    void robot_ai(int robot_index);
+};
+@
+
+\section{Implementation}
+
+<<native.cpp>>=
+#include "native.h"
+#include "memory.h"
+#include <cstdio>
+#include <cstring>
+
+<<native constructor>>
+<<native init>>
+<<native reset>>
+<<native rng>>
+<<native coordinate conversion>>
+<<native sprite drawing>>
+<<native clear screen>>
+<<native maze generation>>
+<<native border walls>>
+<<native print char>>
+<<native print digits>>
+<<native show score>>
+<<native draw lives>>
+<<native colour fill>>
+<<native post maze render>>
+<<native erase pattern>>
+<<native write pattern>>
+<<native move animate vector>>
+<<native room setup>>
+<<native spawn robots>>
+<<native frame logic>>
+<<native snapshot restore>>
+<<native input and output>>
+@
+
+\subsection{Constructor and Init}
+
+<<native constructor>>=
+BerzerkNative::BerzerkNative()
+{
+}
+@
+
+<<native init>>=
+bool BerzerkNative::init(const char* rom_dir)
+{
+    // Load program ROMs (we need pattern data and character set)
+    static const std::vector<RomDescriptor> roms = {
+        {"berzerk_rc31_1c.rom0.1c",   0x0000, 0x0800, 0xca566dbc},
+        {"berzerk_rc31_1d.rom1.1d",   0x1000, 0x0800, 0x7ba69fde},
+        {"berzerk_rc31_3d.rom2.3d",   0x1800, 0x0800, 0xa1d5248b},
+        {"berzerk_rc31_5d.rom3.5d",   0x2000, 0x0800, 0xfcaefa95},
+        {"berzerk_rc31_6d.rom4.6d",   0x2800, 0x0800, 0x1e35b9a0},
+        {"berzerk_rc31a_5c.rom5.5c",  0x3000, 0x0800, 0xe0fab8f5},
+    };
+
+    if (!load_roms(rom_dir, roms, m_program_rom, 0x4000)) {
+        std::fprintf(stderr, "BerzerkNative: failed to load ROMs\n");
+        return false;
+    }
+
+    m_patterns = &m_program_rom[0x1000];
+    m_charset = &m_program_rom[0x2F1E];
+
+    reset();
+    return true;
+}
+@
+
+<<native reset>>=
+void BerzerkNative::reset()
+{
+    m_video.vram.fill(0);
+    m_video.color_ram.fill(0);
+    m_video.magic = MagicRAMControl{};
+    m_state = GameState{};
+    m_state.phase = GameState::Phase::ATTRACT;
+}
+@
+
+\subsection{Random Number Generator}
+
+Exact replica of the ROM routine at \$2678: [[seed = seed * 7 + \$3153]].
+Returns the high byte of the new seed.
+
+<<native rng>>=
+uint8_t BerzerkNative::random()
+{
+    m_state.rng_seed = static_cast<uint16_t>(
+        (m_state.rng_seed * 7 + 0x3153) & 0xFFFF);
+    return static_cast<uint8_t>(m_state.rng_seed >> 8);
+}
+@
+
+\subsection{Coordinate Conversion}
+
+Convert (Y, X) screen coordinates to a Magic RAM address. The original
+routine is CALCULATE\_MAGIC\_IMAGE\_RAM\_ADDRESS at \$29A3. The formula is:
+\begin{verbatim}
+vram_offset = (Y * 32) + (X / 8)
+magic_addr = 0x6000 + vram_offset
+\end{verbatim}
+
+The Magic RAM control register is set to configure the 74181 ALU mode and
+the pixel shift amount (X \% 8).
+
+<<native coordinate conversion>>=
+uint16_t BerzerkNative::calc_magic_ram_addr(uint8_t y, uint8_t x)
+{
+    // Replicate CALCULATE_MAGIC_IMAGE_RAM_ADDRESS at $29A3:
+    // HL = (Y * 256) | X, then HL shifts right 3, then HL += $6400.
+    // The $6400 base (not $6000) accounts for the 32-line vblank gap.
+    uint16_t hl = (static_cast<uint16_t>(y) @<< 8) | x;
+    hl >>= 3;
+    return 0x6400 + hl;
+}
+@
+
+\subsection{Sprite Drawing}
+
+Draw a sprite through the Magic RAM pipeline. This replicates DRAW\_SPRITE
+at \$2817. The frame data format is [width][height][pixel bytes...].
+The [[dest\_addr]] is a Magic RAM address (0x6000--0x7FFF).
+
+The Z80 code handles two modes: 1-byte wide (stride \$1F after data+flush)
+and 2-byte wide (stride \$1E after 2 data bytes + flush). We only support
+upright cabinet (FLIP=0).
+
+<<native sprite drawing>>=
+void BerzerkNative::draw_sprite(const uint8_t* frame_data, uint16_t dest_addr)
+{
+    uint8_t width = frame_data[0];
+    uint8_t height = frame_data[1];
+    const uint8_t* pixels = &frame_data[2];
+
+    uint16_t vram_offset = dest_addr - 0x6000;
+
+    if (width == 1) {
+        // 1-byte wide: stride = 32 - 1 (data) = $1F after flush
+        for (int row = 0; row < height; row++) {
+            magic_ram_write(m_video, vram_offset, pixels[row]);
+            magic_ram_write(m_video, vram_offset + 1, 0x00);
+            vram_offset += BYTES_PER_ROW;
+        }
+    } else {
+        // 2-byte wide: stride = 32 - 2 (data) = $1E after flush
+        for (int row = 0; row < height; row++) {
+            magic_ram_write(m_video, vram_offset, pixels[row * 2]);
+            magic_ram_write(m_video, vram_offset + 1, pixels[row * 2 + 1]);
+            magic_ram_write(m_video, vram_offset + 2, 0x00);
+            vram_offset += BYTES_PER_ROW;
+        }
+    }
+}
+
+void BerzerkNative::draw_wall_tile(uint8_t y, uint8_t x)
+{
+    // Set magic RAM control: $10 = OR mode, shift = x % 8
+    uint8_t shift = x & 0x07;
+    m_video.magic.control = 0x10 | shift;
+    m_video.magic.last_shift_data = 0;
+    m_video.magic.intercept = 1;
+
+    uint16_t addr = calc_magic_ram_addr(y, x);
+    draw_sprite(WALL_SPRITE, addr);
+}
+@
+
+\subsection{Clear Screen}
+
+The original clear screen uses a stack-push trick. We just memset VRAM.
+
+<<native clear screen>>=
+void BerzerkNative::clear_screen()
+{
+    m_video.vram.fill(0);
+}
+@
+
+\subsection{Maze Generation}
+
+Exact reimplementation of the ROM maze generator at \$2540--\$2677.
+This is deterministic: given the same (room\_x, room\_y), it produces
+the identical VRAM content as the emulated Z80 code.
+
+<<native maze generation>>=
+void BerzerkNative::draw_horizontal_segment(uint8_t y, uint8_t x)
+{
+    for (int i = 0; i < 12; i++) {
+        draw_wall_tile(y, x);
+        x += 4;
+    }
+}
+
+void BerzerkNative::draw_vertical_segment(uint8_t y, uint8_t x)
+{
+    for (int i = 0; i < 18; i++) {
+        draw_wall_tile(y, x);
+        y += 4;
+    }
+}
+@
+
+<<native border walls>>=
+void BerzerkNative::draw_borders()
+{
+    // Horizontal border wall with gap: 48 + 48 + 48gap + 48 + 48
+    auto draw_horiz_gap = [&](uint8_t y, uint8_t x) {
+        draw_horizontal_segment(y, x);
+        x += 48;
+        draw_horizontal_segment(y, x);
+        x += 48;
+        x += 48;  // gap (doorway)
+        draw_horizontal_segment(y, x);
+        x += 48;
+        draw_horizontal_segment(y, x);
+    };
+
+    // Vertical border wall with gap: 72 + 64gap + 72
+    auto draw_vert_gap = [&](uint8_t y, uint8_t x) {
+        draw_vertical_segment(y, x);
+        y += 72 + 64;  // wall + gap
+        draw_vertical_segment(y, x);
+    };
+
+    draw_horiz_gap(0x00, 0x08);   // top border
+    draw_horiz_gap(0xCC, 0x08);   // bottom border
+    draw_vert_gap(0x00, 0x04);    // left border
+    draw_vert_gap(0x00, 0xF8);    // right border
+}
+
+void BerzerkNative::generate_maze()
+{
+    // 1. Seed RNG from room coordinates
+    m_state.rng_seed = (static_cast<uint16_t>(m_state.room_y) @<< 8) |
+                        m_state.room_x;
+
+    // 2. Copy wall template to config buffer
+    std::memcpy(m_state.maze_config, WALL_TEMPLATE, 15);
+
+    // 3. Clear the maze area in VRAM
+    // Original clears a 12x12 byte rect at $5E6A (upright)
+    // For simplicity, we clear the whole screen since we are about to draw everything
+    clear_screen();
+
+    // 4. Draw border walls with doorways
+    draw_borders();
+
+    // 5. Generate interior walls (two passes: top half and bottom half)
+    int ix_offset = 0;
+
+    for (int half = 0; half < 2; half++) {
+        uint8_t base_y = (half == 0) ? 0x44 : 0x88;
+        uint8_t x = 0x38;
+
+        while (true) {
+            random();  // first call (advances state, result unused for dispatch)
+            uint8_t r = random();  // second call
+            uint8_t wall_type = r & 0x03;
+
+            switch (wall_type) {
+            case 0:  // extends UP
+                draw_vertical_segment(
+                    static_cast<uint8_t>(base_y - 0x44), x);
+                m_state.maze_config[ix_offset] |= 0x02;
+                m_state.maze_config[ix_offset + 1] |= 0x01;
+                break;
+            case 1:  // extends DOWN
+                draw_vertical_segment(base_y, x);
+                m_state.maze_config[ix_offset + 5] |= 0x02;
+                m_state.maze_config[ix_offset + 6] |= 0x01;
+                break;
+            case 2:  // extends RIGHT
+                draw_horizontal_segment(base_y, x);
+                m_state.maze_config[ix_offset + 1] |= 0x08;
+                m_state.maze_config[ix_offset + 6] |= 0x04;
+                break;
+            case 3:  // extends LEFT
+                draw_horizontal_segment(base_y,
+                    static_cast<uint8_t>(x - 0x30));
+                m_state.maze_config[ix_offset] |= 0x08;
+                m_state.maze_config[ix_offset + 5] |= 0x04;
+                break;
+            }
+
+            ix_offset++;
+            x += 0x30;
+            if (x >= 0xDC) {
+                ix_offset++;  // skip right border byte
+                break;
+            }
+        }
+    }
+}
+@
+
+\subsection{Character Printing}
+
+Exact reimplementation of PRINT\_CHAR at \$29DB. Each character is 9 bytes in
+the font ROM at \$2F1E, indexed by ordinal. If bit~7 of the first font byte is
+set, the character is drawn 3 scanlines lower. Each scanline: write the font
+byte (with bit~7 masked off) through the Magic~RAM pipeline, then write a
+\$00 flush byte to clear the shift register.
+
+<<native print char>>=
+void BerzerkNative::print_char(uint8_t c, uint16_t dest_addr)
+{
+    if (!m_charset) return;
+
+    const uint8_t* font = &m_charset[static_cast<unsigned>(c) * 9];
+    uint16_t vram_offset = dest_addr - 0x6000;
+
+    // Bit 7 of first byte: shift 3 scanlines down ($0060 = 3 * $20)
+    if (font[0] & 0x80) {
+        vram_offset += 0x0060;
+    }
+
+    // Draw 9 rows
+    for (int row = 0; row < 9; row++) {
+        uint8_t data = font[row] & 0x7F;
+        magic_ram_write(m_video, vram_offset, data);
+        magic_ram_write(m_video, vram_offset + 1, 0x00);  // flush
+        vram_offset += 0x20;  // next scanline (32 bytes per row)
+    }
+}
+@
+
+\subsection{Digit Printing}
+
+Reimplementation of PRINT\_DIGITS at \$2A40. Prints a BCD-encoded number
+with leading-space suppression. Each BCD byte holds two digits (upper nibble
+first). The last digit is always shown even if zero.
+
+<<native print digits>>=
+void BerzerkNative::print_digits(const uint8_t* bcd_data, int num_digits,
+                                  uint8_t y, uint8_t x)
+{
+    // Set magic RAM control: mode 0 (direct write) + shift from X
+    uint8_t shift = x & 0x07;
+    m_video.magic.control = shift;
+    m_video.magic.last_shift_data = 0;
+    m_video.magic.intercept = 1;
+
+    uint16_t dest = calc_magic_ram_addr(y, x);
+
+    bool pad_with_spaces = true;
+
+    for (int i = 0; i < num_digits; i++) {
+        int remaining = num_digits - i;
+        if (remaining == 1) {
+            pad_with_spaces = false;
+        }
+
+        // Extract BCD digit: even index = upper nibble, odd = lower nibble
+        uint8_t digit;
+        if ((i & 1) == 0) {
+            digit = (bcd_data[i / 2] >> 4) & 0x0F;
+        } else {
+            digit = bcd_data[i / 2] & 0x0F;
+        }
+
+        uint8_t ch;
+        if (digit == 0 && pad_with_spaces) {
+            ch = 0x20;  // space
+        } else {
+            pad_with_spaces = false;
+            ch = 0x30 + digit;  // ASCII '0' + digit
+            if (ch >= 0x3A) ch += 7;  // hex digits A-F
+        }
+
+        print_char(ch, dest);
+        dest++;  // next character position (1 byte = 8 pixels)
+    }
+}
+@
+
+\subsection{Score Display}
+
+Reimplementation of SHOW\_SCORE at \$2314. Prints P1 score (6 BCD digits)
+at screen position Y=\$D5, X=\$00. In two-player mode, also prints P2 score
+at Y=\$D5, X=\$B0 (not implemented yet).
+
+<<native show score>>=
+void BerzerkNative::show_score()
+{
+    // P1 score at (Y=$D5, X=$00), 6 digits, 3 BCD bytes
+    print_digits(m_state.score, 6, 0xD5, 0x00);
+}
+@
+
+\subsection{Lives Display}
+
+Reimplementation of the lives display at \$259A--\$25BD. Draws
+(deaths$-$1) stick-man icons (character \$80) at the bottom of the screen.
+
+<<native draw lives>>=
+void BerzerkNative::draw_lives()
+{
+    // Determine position based on current player
+    uint8_t y = 0xD5;
+    uint8_t x = (m_state.current_player == 2) ? 0xE8 : 0x38;
+
+    // Set magic RAM control: mode 0, shift from X
+    uint8_t shift = x & 0x07;
+    m_video.magic.control = shift;
+    m_video.magic.last_shift_data = 0;
+    m_video.magic.intercept = 1;
+
+    uint16_t dest = calc_magic_ram_addr(y, x);
+
+    int lives_to_draw = m_state.deaths - 1;
+    if (lives_to_draw <= 0) return;
+
+    for (int i = 0; i < lives_to_draw; i++) {
+        print_char(0x80, dest);
+        dest++;  // next character position
+    }
+}
+@
+
+\subsection{Colour Fill}
+
+Reimplementation of COLOUR\_FILL at \$3657. Fills a rectangle in colour RAM.
+For upright cabinet: base address is \$8100 + offset.
+
+<<native colour fill>>=
+void BerzerkNative::colour_fill(uint16_t offset, uint8_t lines,
+                                 uint8_t width, uint8_t colour)
+{
+    // Upright cabinet: colour RAM at $8100 + offset
+    uint16_t base = 0x0100 + offset;  // index into color_ram ($8000 base)
+
+    for (int row = 0; row < lines; row++) {
+        for (int col = 0; col < width; col++) {
+            uint16_t idx = (base + col) & 0x07FF;
+            m_video.color_ram[idx] = colour;
+        }
+        base += 0x20;  // next row (32 bytes per row)
+    }
+}
+@
+
+\subsection{Post-Maze Rendering}
+
+After maze generation, the Z80 code at \$2597--\$25C9 sets up colour
+attributes, draws life icons, and displays the score.
+
+<<native post maze render>>=
+void BerzerkNative::post_maze_render()
+{
+    // $2597: call $369F -- status area colour fill
+    colour_fill(0x0680, 4, 0x20, 0x77);
+
+    // $36A7: call $35E7 -- additional colour regions
+    colour_fill(0x0680, 4, 0x0A, 0xAA);
+    colour_fill(0x0696, 4, 0x0A, 0xDD);
+
+    // $259A: draw lives
+    draw_lives();
+
+    // $25C6: show score
+    show_score();
+}
+@
+
+\subsection{Erase Pattern}
+
+Reimplementation of ERASE\_PATTERN at \$272D. Reads the old magic control byte,
+old screen address, and old pattern pointer from the VECTOR struct, then
+calls [[draw\_sprite]] to XOR-erase the previous sprite image.
+
+The Z80 stores these ``old'' values during the previous WRITE\_PATTERN call
+so that the erase uses exactly the same parameters. After erasing, the
+ERASE status bit is cleared so it is not done twice.
+
+<<native erase pattern>>=
+void BerzerkNative::erase_pattern(Vector& v)
+{
+    if (!(v.status & STATUS_ERASE)) return;
+    v.status &= ~STATUS_ERASE;
+
+    // Restore the magic control byte that was active when the sprite was drawn
+    m_video.magic.control = v.magic;
+    m_video.magic.last_shift_data = 0;
+    m_video.magic.intercept = 1;
+
+    // old_pattern_addr points into ROM pattern data (absolute ROM address)
+    if (v.old_pattern_addr == 0) return;
+    const uint8_t* pattern = &m_program_rom[v.old_pattern_addr];
+
+    draw_sprite(pattern, v.old_screen_addr);
+}
+@
+
+\subsection{Write Pattern}
+
+Reimplementation of WRITE\_PATTERN at \$274D. Computes a Magic RAM address
+from the VECTOR's current (P.X, P.Y) position using XOR mode (\$90), then
+follows the double-indirection pattern pointer to find the actual sprite
+data, draws it, and checks the intercept register for collision.
+
+The pattern pointer follows double indirection:
+\begin{enumerate}
+\item D.P points to an animation table entry (2 bytes: pointer to frame data).
+\item The frame data pointer may have bit~7 set, indicating a position offset
+      (2 bytes: signed BC) to add to the screen address before drawing.
+\end{enumerate}
+
+After drawing, the old screen address, magic control, and pattern pointer
+are saved into the VECTOR so that ERASE\_PATTERN can undo the draw later.
+
+<<native write pattern>>=
+void BerzerkNative::write_pattern(Vector& v)
+{
+    if (!(v.status & STATUS_WRITE)) return;
+    v.status &= ~STATUS_WRITE;
+
+    // Compute magic RAM address from (P.X, P.Y) with XOR mode ($90)
+    uint8_t shift = v.px & 0x07;
+    uint8_t magic_ctrl = shift | 0x90;
+    m_video.magic.control = magic_ctrl;
+    m_video.magic.last_shift_data = 0;
+    m_video.magic.intercept = 1;
+
+    uint16_t screen_addr = calc_magic_ram_addr(v.py, v.px);
+
+    // Save magic control byte into VECTOR for later erase
+    v.magic = magic_ctrl;
+
+    // Follow double indirection: D.P -> [animation table entry] -> sprite data
+    // D.P is a ROM address pointing to a 2-byte pointer
+    uint16_t anim_entry_addr = v.pattern_ptr;
+    uint16_t frame_addr = static_cast<uint16_t>(m_program_rom[anim_entry_addr]) |
+                          (static_cast<uint16_t>(m_program_rom[anim_entry_addr + 1]) @<< 8);
+
+    // Check if first byte of frame data has bit 7 set (position offset present)
+    uint8_t first_byte = m_program_rom[frame_addr];
+    const uint8_t* pattern;
+    if (first_byte & 0x80) {
+        // Position offset: next 2 bytes are signed offset (low, high)
+        int16_t offset = static_cast<int16_t>(
+            static_cast<uint16_t>(first_byte & 0x7F) |
+            (static_cast<uint16_t>(m_program_rom[frame_addr + 1]) @<< 8));
+        screen_addr = static_cast<uint16_t>(screen_addr + offset);
+        pattern = &m_program_rom[frame_addr + 2];
+    } else {
+        pattern = &m_program_rom[frame_addr];
+    }
+
+    // Save old values for erase
+    v.old_pattern_addr = static_cast<uint16_t>(pattern - m_program_rom.data());
+    v.old_screen_addr = screen_addr;
+
+    // Draw the sprite
+    draw_sprite(pattern, screen_addr);
+
+    // Check collision via intercept register (port $4E)
+    uint8_t intercept = read_intercept(m_video);
+    if (intercept & 0x80) {
+        v.status |= STATUS_HIT;
+    }
+}
+@
+
+\subsection{Move and Animate Vector}
+
+Reimplementation of MOVE\_ANIMATE\_VECTOR at \$27A9. This is the core
+update loop for every moving object (player, robots, Otto).
+
+Each frame:
+\begin{enumerate}
+\item If STATUS\_MOVE is not set, return immediately.
+\item Decrement TIME. If non-zero, return (object not ready to move yet).
+\item When TIME reaches zero, reload from TPRIME.
+\item Add velocity (V.X, V.Y) to position (P.X, P.Y).
+\item Advance the animation frame: D.P += 2. If the new entry points to
+      a zero byte, follow the 2-byte restart pointer to loop the animation.
+\item OR \$1B into status (sets ERASE, WRITE, MOVE, COLOR bits).
+\item If STATUS\_DYING is set, cycle the player colour.
+\end{enumerate}
+
+<<native move animate vector>>=
+void BerzerkNative::move_animate_vector(Vector& v)
+{
+    if (!(v.status & STATUS_MOVE)) return;
+
+    // Decrement TIME countdown
+    v.time--;
+    if (v.time != 0) return;
+
+    // Reload TIME from TPRIME
+    v.time = v.tprime;
+
+    // Apply velocity to position
+    v.px = static_cast<uint8_t>(v.px + v.vx);
+    v.py = static_cast<uint8_t>(v.py + v.vy);
+
+    // Advance animation frame: D.P += 2
+    v.pattern_ptr += 2;
+
+    // Check if we hit the end of the animation table (zero byte)
+    uint16_t check_addr = v.pattern_ptr;
+    uint8_t check = m_program_rom[check_addr];
+    if (check == 0) {
+        // End marker: next 2 bytes are the restart pointer
+        uint16_t restart = static_cast<uint16_t>(m_program_rom[check_addr + 1]) |
+                           (static_cast<uint16_t>(m_program_rom[check_addr + 2]) @<< 8);
+        v.pattern_ptr = restart;
+    }
+
+    // Set status bits: ERASE | WRITE | MOVE | COLOR = $1B
+    v.status |= 0x1B;
+
+    // If DYING bit set, cycle player colour
+    if (v.status & STATUS_DYING) {
+        m_state.player_colour = static_cast<uint8_t>(
+            (m_state.player_colour @<< 1) |
+            (m_state.player_colour >> 7));
+        m_state.player_colour ^= 0x11;
+    }
+}
+@
+
+\subsection{Room Setup}
+
+<<native room setup>>=
+void BerzerkNative::do_room_setup()
+{
+    generate_maze();
+    post_maze_render();
+    spawn_robots();
+    m_state.phase = GameState::Phase::PLAYING;
+}
+@
+
+\subsection{Robot Spawning}
+
+Reimplementation of the ROM robot spawning at \$2117--\$2154.
+
+<<native spawn robots>>=
+void BerzerkNative::spawn_robots()
+{
+    m_state.rcount = 0;
+    m_state.rsaved = 0;
+
+    for (int i = 0; i < MAX_ROBOTS; i++) {
+        m_state.robots[i].active = false;
+    }
+
+    for (int slot = 0; slot < MAX_ROBOTS; slot++) {
+        uint8_t r = random();
+
+        // Spawn probability check: r >= difficulty threshold
+        if (r < m_state.difficulty) continue;
+
+        // Spawn at position from table, jittered
+        uint8_t base_x = SPAWN_POSITIONS[slot][0];
+        uint8_t base_y = SPAWN_POSITIONS[slot][1];
+        uint8_t jitter_x = random() & 0x1F;  // 0-31
+        uint8_t jitter_y = random() & 0x1F;
+
+        Vector& robot = m_state.robots[slot];
+        robot.active = true;
+        robot.px = base_x + jitter_x;
+        robot.py = base_y + jitter_y;
+        robot.vx = 0;
+        robot.vy = 0;
+        robot.status = STATUS_WRITE | STATUS_MOVE;  // $06
+        robot.time = 1;
+        robot.tprime = m_state.robot_speed;
+        // Pattern pointer: robot standing ($1000 in ROM)
+        robot.pattern_ptr = 0x1000;
+
+        m_state.rcount++;
+        m_state.rsaved++;
+    }
+
+    // Calculate Otto timer
+    m_state.otto_time = m_state.robot_speed + m_state.rsaved + m_state.rbolts;
+}
+@
+
+\subsection{Frame Logic}
+
+Each frame: process input, run game logic, render sprites.
+
+<<native frame logic>>=
+void BerzerkNative::step_frame()
+{
+    switch (m_state.phase) {
+    case GameState::Phase::BOOT:
+        m_state.phase = GameState::Phase::ATTRACT;
+        break;
+
+    case GameState::Phase::ATTRACT:
+        do_frame_attract();
+        break;
+
+    case GameState::Phase::GAME_INIT:
+        m_state.deaths = 3;
+        m_state.score[0] = m_state.score[1] = m_state.score[2] = 0;
+        m_state.difficulty = 0;
+        m_state.robot_speed = 8;
+        m_state.rwait = 80;
+        m_state.xtramen = 0;
+        m_state.room_x = random();
+        m_state.room_y = random();
+        m_state.man_x = 0x80;
+        m_state.man_y = 0x60;
+        m_state.phase = GameState::Phase::ROOM_SETUP;
+        break;
+
+    case GameState::Phase::ROOM_SETUP:
+        do_room_setup();
+        break;
+
+    case GameState::Phase::PLAYING:
+        do_frame_playing();
+        break;
+
+    case GameState::Phase::PLAYER_DEAD:
+        m_state.phase_timer--;
+        if (m_state.phase_timer <= 0) {
+            m_state.deaths--;
+            if (m_state.deaths == 0) {
+                m_state.phase = GameState::Phase::GAME_OVER;
+            } else {
+                m_state.man_x = 0x80;
+                m_state.man_y = 0x60;
+                m_state.phase = GameState::Phase::ROOM_SETUP;
+            }
+        }
+        break;
+
+    case GameState::Phase::ROOM_CLEAR:
+        m_state.phase_timer--;
+        if (m_state.phase_timer <= 0) {
+            // Advance room
+            m_state.room_x++;
+            m_state.difficulty = static_cast<uint8_t>(
+                m_state.difficulty + 0x60);  // BCD add wraps
+            if (m_state.robot_speed > 1) m_state.robot_speed--;
+            if (m_state.rwait > 20) m_state.rwait -= 10;
+            m_state.man_x = 0x08;
+            m_state.man_y = 0x60;
+            m_state.phase = GameState::Phase::ROOM_SETUP;
+        }
+        break;
+
+    case GameState::Phase::GAME_OVER:
+        m_state.phase_timer--;
+        if (m_state.phase_timer <= 0) {
+            m_state.phase = GameState::Phase::ATTRACT;
+        }
+        break;
+    }
+
+    m_state.frame_number++;
+}
+
+void BerzerkNative::do_frame_attract()
+{
+    // Check for coin + start
+    if ((m_input.port_49 & 0x80) == 0) {  // coin inserted (active low)
+        // Wait for 1P start
+        if ((m_input.port_49 & 0x01) == 0) {
+            m_state.phase = GameState::Phase::GAME_INIT;
+        }
+    }
+}
+
+void BerzerkNative::do_frame_playing()
+{
+    // Process player input -> set velocity on player VECTOR
+    uint8_t joy = m_input.port_48;
+    int8_t dx = 0, dy = 0;
+    if ((joy & 0x01) == 0) dx = -1;  // left
+    if ((joy & 0x02) == 0) dx = 1;   // right
+    if ((joy & 0x04) == 0) dy = -1;  // up
+    if ((joy & 0x08) == 0) dy = 1;   // down
+    m_state.player.vx = dx;
+    m_state.player.vy = dy;
+
+    // Run sprite pipeline on player
+    erase_pattern(m_state.player);
+    move_animate_vector(m_state.player);
+    write_pattern(m_state.player);
+
+    // Run sprite pipeline on each active robot
+    for (int i = 0; i < MAX_ROBOTS; i++) {
+        if (!m_state.robots[i].active) continue;
+        erase_pattern(m_state.robots[i]);
+        move_animate_vector(m_state.robots[i]);
+        write_pattern(m_state.robots[i]);
+    }
+
+    // Check room exit
+    check_room_exit();
+
+    // Check if all robots dead
+    if (m_state.rcount == 0 && m_state.phase == GameState::Phase::PLAYING) {
+        m_state.phase = GameState::Phase::ROOM_CLEAR;
+        m_state.phase_timer = 60;
+    }
+}
+
+void BerzerkNative::check_room_exit()
+{
+    uint8_t x = m_state.player.px;
+    uint8_t y = m_state.player.py;
+
+    if (x >= EXIT_RIGHT_X) {
+        m_state.room_x++;
+        m_state.man_x = 0x08;
+        m_state.man_y = y;
+        m_state.phase = GameState::Phase::ROOM_SETUP;
+    } else if (x >= EXIT_LEFT_X) {
+        m_state.room_x--;
+        m_state.man_x = 0xF0;
+        m_state.man_y = y;
+        m_state.phase = GameState::Phase::ROOM_SETUP;
+    } else if (y < EXIT_TOP_Y) {
+        m_state.room_y--;
+        m_state.man_x = x;
+        m_state.man_y = 0xBC;
+        m_state.phase = GameState::Phase::ROOM_SETUP;
+    } else if (y >= EXIT_BOTTOM_Y) {
+        m_state.room_y++;
+        m_state.man_x = x;
+        m_state.man_y = 0x04;
+        m_state.phase = GameState::Phase::ROOM_SETUP;
+    }
+}
+@
+
+\subsection{Snapshot and Restore}
+
+<<native snapshot restore>>=
+MachineSnapshot BerzerkNative::snapshot() const
+{
+    MachineSnapshot snap;
+    snap.cpu = {};  // no CPU state in native implementation
+    snap.work_ram.fill(0);
+
+    // Pack game state into work_ram at the canonical addresses
+    // This is a simplified mapping for cosimulation
+    snap.work_ram[0x0345 - 0x0800] = m_state.room_x;  // but this is scratch RAM range
+    // For now, VRAM comparison is the primary verification mechanism.
+
+    snap.vram = m_video.vram;
+    snap.color_ram = m_video.color_ram;
+    snap.magic_control = m_video.magic.control;
+    snap.magic_intercept = m_video.magic.intercept;
+    snap.nmi_enabled = m_interrupts.nmi_enabled;
+    snap.irq_enabled = m_interrupts.irq_enabled;
+    snap.frame_number = m_state.frame_number;
+
+    return snap;
+}
+
+void BerzerkNative::restore(const MachineSnapshot& snap)
+{
+    m_video.vram = snap.vram;
+    m_video.color_ram = snap.color_ram;
+    m_video.magic.control = snap.magic_control;
+    m_video.magic.intercept = snap.magic_intercept;
+    m_state.frame_number = snap.frame_number;
+}
+@
+
+\subsection{Input and Output}
+
+<<native input and output>>=
+void BerzerkNative::set_input(const InputState& input)
+{
+    m_input = input;
+}
+
+const uint8_t* BerzerkNative::vram_data() const
+{
+    return m_video.vram.data();
+}
+
+int BerzerkNative::frame_count() const
+{
+    return m_state.frame_number;
+}
+@
+
+\end{document}

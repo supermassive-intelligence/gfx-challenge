@@ -1,0 +1,643 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Memory Subsystem}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The memory subsystem provides the address bus abstraction for the Berzerk
+emulator. Following MAME's design, all memory access goes through callbacks
+rather than direct array indexing. This ensures observability and enables
+instrumentation for debugging and cosimulation.
+
+The Z80 CPU in Berzerk has two address spaces:
+\begin{itemize}
+\item \textbf{Program space}: 16-bit addresses (64~KB), used for ROM, RAM, VRAM,
+  and memory-mapped hardware.
+\item \textbf{I/O space}: 8-bit addresses (256 ports), used for sound, input,
+  DIP switches, and control registers.
+\end{itemize}
+
+Each address range is mapped to a handler that defines the read and write
+behavior. Some ranges are read-only (ROM), some are read-write (RAM, VRAM),
+and some have side effects on read or write (Magic RAM, I/O ports).
+
+\section{Header}
+
+<<memory.h>>=
+#ifndef BERZERK_MEMORY_H
+#define BERZERK_MEMORY_H
+
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+#include <array>
+
+#include "video.h"
+#include "sound.h"
+#include "interrupts.h"
+#include "platform.h"
+
+<<rom descriptor>>
+<<memory handler types>>
+<<address space class>>
+<<rom loader declaration>>
+<<berzerk memory struct>>
+
+#endif // BERZERK_MEMORY_H
+@
+
+\section{Memory Handler Types}
+
+A memory handler is a pair of callbacks: one for reads, one for writes. The
+read callback takes an address and returns a byte. The write callback takes
+an address and a byte. This follows MAME's [[data_read]]/[[data_write]] pattern.
+
+Handlers that do nothing (unmapped regions) return 0xFF on read and silently
+discard writes. This matches real Z80 bus behavior: floating data lines tend
+to read high.
+
+<<memory handler types>>=
+using ReadHandler = std::function<uint8_t(uint16_t addr)>;
+using WriteHandler = std::function<void(uint16_t addr, uint8_t data)>;
+
+struct MemoryRegion {
+    uint16_t start;
+    uint16_t end;       // inclusive
+    ReadHandler read;
+    WriteHandler write;
+    std::string name;   // for debug/instrumentation
+};
+@
+
+\section{Address Space}
+
+The [[AddressSpace]] class manages a list of memory regions. On each read or
+write, it searches for the region that contains the target address and
+dispatches to its handler.
+
+The Berzerk machine has a simple memory map with no bank switching, so a
+linear search through a small number of regions is adequate. MAME uses a
+more complex page-table approach for machines with hundreds of regions, but
+Berzerk has fewer than 10 program-space regions and fewer than 20 I/O
+regions. Linear search over these is effectively free.
+
+<<address space class>>=
+class AddressSpace {
+public:
+    AddressSpace(const std::string& name, uint32_t addr_mask);
+
+    // Register a memory region with read/write handlers.
+    void map(uint16_t start, uint16_t end,
+             ReadHandler read, WriteHandler write,
+             const std::string& region_name);
+
+    // Map a read-only region (writes are ignored).
+    void map_rom(uint16_t start, uint16_t end,
+                 ReadHandler read,
+                 const std::string& region_name);
+
+    // Map a region that returns a fixed value on read, ignores writes.
+    void map_unconnected(uint16_t start, uint16_t end,
+                         const std::string& region_name);
+
+    uint8_t read(uint16_t addr) const;
+    void write(uint16_t addr, uint8_t data);
+
+    const std::string& name() const { return m_name; }
+
+    // Instrumentation: count of reads and writes since last reset.
+    uint64_t read_count() const { return m_read_count; }
+    uint64_t write_count() const { return m_write_count; }
+    void reset_counts() { m_read_count = 0; m_write_count = 0; }
+
+private:
+    std::string m_name;
+    uint32_t m_addr_mask;
+    std::vector<MemoryRegion> m_regions;
+    mutable uint64_t m_read_count = 0;
+    mutable uint64_t m_write_count = 0;
+};
+@
+
+\section{ROM Descriptor and Loader}
+
+Each Berzerk ROM file has a known filename, load address, size, and CRC32
+checksum. The loader reads each file from disk and verifies its CRC32 against
+the expected value. If a ROM fails verification, the loader reports the error
+and returns failure rather than silently running with corrupt data.
+
+CRC32 is computed using the standard polynomial 0xEDB88320 (reflected).
+This matches the CRC values published in the MAME ROM definitions.
+
+<<rom descriptor>>=
+struct RomDescriptor {
+    std::string filename;
+    uint16_t load_addr;
+    uint16_t size;
+    uint32_t crc32;
+};
+@
+
+<<rom loader declaration>>=
+// Load ROM files into a flat byte array. Returns true on success.
+// On failure, prints diagnostic to stderr and returns false.
+bool load_roms(const std::string& rom_dir,
+               const std::vector<RomDescriptor>& descriptors,
+               std::vector<uint8_t>& rom_data,
+               uint32_t rom_data_size);
+
+// Compute CRC32 of a byte buffer.
+uint32_t compute_crc32(const uint8_t* data, size_t length);
+@
+
+<<berzerk memory struct>>=
+struct BerzerkMemory {
+    AddressSpace program;
+    AddressSpace io;
+    std::vector<uint8_t> program_rom;
+    std::vector<uint8_t> voice_rom;
+
+    // Hardware state -- owned here for testability and cosimulation
+    std::array<uint8_t, 0x0400> work_ram;
+    VideoState video;
+    InterruptState interrupts;
+    SoundState sound;
+    InputState input;
+
+    BerzerkMemory() : program("program", 0xFFFF), io("io", 0xFF) {
+        work_ram.fill(0);
+    }
+};
+
+bool setup_berzerk_memory(BerzerkMemory& mem, const std::string& rom_dir);
+@
+
+\section{Implementation}
+
+<<memory.cpp>>=
+#include "memory.h"
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+
+<<crc32 implementation>>
+<<address space implementation>>
+<<rom loader implementation>>
+@
+
+\subsection{CRC32}
+
+Standard CRC32 with reflected polynomial. No lookup table needed for the
+small ROM files we are loading (a few KB each).
+
+<<crc32 implementation>>=
+uint32_t compute_crc32(const uint8_t* data, size_t length)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0xEDB88320;
+            else
+                crc = crc >> 1;
+        }
+    }
+    return ~crc;
+}
+@
+
+\subsection{Address Space}
+
+The constructor takes a name (for debug output) and an address mask. The
+program space uses mask 0xFFFF (16-bit). The I/O space uses mask 0xFF
+(8-bit), matching the Berzerk hardware which only decodes the low 8 bits
+of the I/O address.
+
+<<address space implementation>>=
+AddressSpace::AddressSpace(const std::string& name, uint32_t addr_mask)
+    : m_name(name)
+    , m_addr_mask(addr_mask)
+{
+}
+
+void AddressSpace::map(uint16_t start, uint16_t end,
+                       ReadHandler read, WriteHandler write,
+                       const std::string& region_name)
+{
+    m_regions.push_back({start, end, read, write, region_name});
+}
+
+void AddressSpace::map_rom(uint16_t start, uint16_t end,
+                           ReadHandler read,
+                           const std::string& region_name)
+{
+    auto nop_write = [](uint16_t, uint8_t) {};
+    m_regions.push_back({start, end, read, nop_write, region_name});
+}
+
+void AddressSpace::map_unconnected(uint16_t start, uint16_t end,
+                                   const std::string& region_name)
+{
+    auto ff_read = [](uint16_t) -> uint8_t { return 0xFF; };
+    auto nop_write = [](uint16_t, uint8_t) {};
+    m_regions.push_back({start, end, ff_read, nop_write, region_name});
+}
+@
+
+Read and write dispatch to the matching region. If no region matches, the
+access falls through to the unmapped default: reads return 0xFF, writes
+are discarded. A diagnostic is printed on first unmapped access to aid
+debugging.
+
+<<address space implementation>>=
+uint8_t AddressSpace::read(uint16_t addr) const
+{
+    addr &= m_addr_mask;
+    m_read_count++;
+    for (const auto& region : m_regions) {
+        if (addr >= region.start && addr <= region.end) {
+            return region.read(addr);
+        }
+    }
+    std::fprintf(stderr, "[%s] unmapped read: 0x%04X\n", m_name.c_str(), addr);
+    return 0xFF;
+}
+
+void AddressSpace::write(uint16_t addr, uint8_t data)
+{
+    addr &= m_addr_mask;
+    m_write_count++;
+    for (auto& region : m_regions) {
+        if (addr >= region.start && addr <= region.end) {
+            region.write(addr, data);
+            return;
+        }
+    }
+    std::fprintf(stderr, "[%s] unmapped write: 0x%04X = 0x%02X\n",
+                 m_name.c_str(), addr, data);
+}
+@
+
+\subsection{ROM Loader}
+
+The loader takes a directory path, a list of ROM descriptors, and a
+pre-sized byte vector. For each descriptor, it reads the file, verifies
+its size and CRC32, and copies it into the byte vector at the specified
+load address.
+
+<<rom loader implementation>>=
+bool load_roms(const std::string& rom_dir,
+               const std::vector<RomDescriptor>& descriptors,
+               std::vector<uint8_t>& rom_data,
+               uint32_t rom_data_size)
+{
+    rom_data.assign(rom_data_size, 0xFF);
+
+    for (const auto& desc : descriptors) {
+        std::string path = rom_dir + "/" + desc.filename;
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            std::fprintf(stderr, "ROM load error: cannot open %s\n", path.c_str());
+            return false;
+        }
+
+        std::vector<uint8_t> buf(desc.size);
+        file.read(reinterpret_cast<char*>(buf.data()), desc.size);
+        size_t bytes_read = file.gcount();
+
+        if (bytes_read != desc.size) {
+            std::fprintf(stderr, "ROM load error: %s expected %u bytes, got %zu\n",
+                         desc.filename.c_str(), desc.size, bytes_read);
+            return false;
+        }
+
+        uint32_t crc = compute_crc32(buf.data(), buf.size());
+        if (crc != desc.crc32) {
+            std::fprintf(stderr, "ROM CRC error: %s expected 0x%08X, got 0x%08X\n",
+                         desc.filename.c_str(), desc.crc32, crc);
+            return false;
+        }
+
+        if (desc.load_addr + desc.size > rom_data_size) {
+            std::fprintf(stderr, "ROM load error: %s at 0x%04X overflows buffer\n",
+                         desc.filename.c_str(), desc.load_addr);
+            return false;
+        }
+
+        std::memcpy(&rom_data[desc.load_addr], buf.data(), buf.size());
+        std::fprintf(stderr, "ROM loaded: %s at 0x%04X (%u bytes, CRC OK)\n",
+                     desc.filename.c_str(), desc.load_addr, desc.size);
+    }
+
+    return true;
+}
+@
+
+\section{Berzerk Memory Map Configuration}
+
+This section defines the ROM table and a factory function that creates the
+fully-configured program and I/O address spaces for the Berzerk machine.
+All RAM arrays are now owned by [[BerzerkMemory]], and I/O handlers are
+wired to the video, sound, and interrupt subsystems.
+
+We put this in a separate source file so the memory subsystem itself remains
+generic and reusable.
+
+<<berzerk_map.cpp>>=
+#include "memory.h"
+#include "video.h"
+#include "sound.h"
+#include "interrupts.h"
+#include <cstdio>
+#include <cstdlib>
+
+<<berzerk rom table>>
+<<berzerk address space setup>>
+@
+
+\subsection{ROM Table}
+
+The ROM descriptors for the RC31A revision, matching the files in
+[[rom/berzerk/]]. These CRC32 values come directly from the MAME driver.
+
+<<berzerk rom table>>=
+static const std::vector<RomDescriptor> BERZERK_PROGRAM_ROMS = {
+    {"berzerk_rc31_1c.rom0.1c",   0x0000, 0x0800, 0xca566dbc},
+    {"berzerk_rc31_1d.rom1.1d",   0x1000, 0x0800, 0x7ba69fde},
+    {"berzerk_rc31_3d.rom2.3d",   0x1800, 0x0800, 0xa1d5248b},
+    {"berzerk_rc31_5d.rom3.5d",   0x2000, 0x0800, 0xfcaefa95},
+    {"berzerk_rc31_6d.rom4.6d",   0x2800, 0x0800, 0x1e35b9a0},
+    {"berzerk_rc31a_5c.rom5.5c",  0x3000, 0x0800, 0xe0fab8f5},
+};
+
+static const std::vector<RomDescriptor> BERZERK_VOICE_ROMS = {
+    {"berzerk_r_vo_1c.1c",  0x0000, 0x0800, 0x2cfe825d},
+    {"berzerk_r_vo_2c.2c",  0x0800, 0x0800, 0xd2b6324e},
+};
+@
+
+\subsection{Address Space Setup}
+
+All RAM (work RAM, video RAM, color RAM) is now owned by [[BerzerkMemory]].
+The lambdas capture [[mem]] by reference so they access member fields
+directly.  I/O handlers delegate to the video, sound, and interrupt
+subsystem functions.
+
+<<berzerk address space setup>>=
+bool setup_berzerk_memory(BerzerkMemory& mem, const std::string& rom_dir)
+{
+    // Load program ROMs
+    if (!load_roms(rom_dir, BERZERK_PROGRAM_ROMS,
+                   mem.program_rom, 0x4000)) {
+        return false;
+    }
+
+    // Load voice ROMs
+    if (!load_roms(rom_dir + "/../berzerk", BERZERK_VOICE_ROMS,
+                   mem.voice_rom, 0x1000)) {
+        // Voice ROMs are not fatal -- game runs without speech
+        std::fprintf(stderr, "Warning: voice ROMs not loaded, speech disabled\n");
+        mem.voice_rom.assign(0x1000, 0xFF);
+    }
+
+    // Zero RAM owned by BerzerkMemory
+    mem.work_ram.fill(0);
+    // VideoState constructor already zeros vram and color_ram
+
+    // Initialize sound with voice ROM pointer
+    sound_reset(mem.sound, mem.voice_rom.data(),
+                static_cast<uint32_t>(mem.voice_rom.size()));
+
+    // -- Program space regions --
+
+    // ROM0: 0x0000-0x07FF
+    auto& prom = mem.program_rom;
+    mem.program.map_rom(0x0000, 0x07FF,
+        [&prom](uint16_t addr) -> uint8_t { return prom[addr]; },
+        "ROM0");
+
+    // Work RAM: 0x0800-0x0FFF (1KB at 0x0800, mirrored)
+    mem.program.map(0x0800, 0x0FFF,
+        [&mem](uint16_t addr) -> uint8_t {
+            return mem.work_ram[addr & 0x03FF];
+        },
+        [&mem](uint16_t addr, uint8_t data) {
+            mem.work_ram[addr & 0x03FF] = data;
+        },
+        "WorkRAM");
+
+    // ROM1-ROM5: 0x1000-0x37FF
+    mem.program.map_rom(0x1000, 0x37FF,
+        [&prom](uint16_t addr) -> uint8_t { return prom[addr]; },
+        "ROM1-5");
+
+    // ROM6 unpopulated: 0x3800-0x3FFF (reads 0xFF)
+    mem.program.map_unconnected(0x3800, 0x3FFF, "ROM6-empty");
+
+    // Video RAM: 0x4000-0x5FFF (8KB)
+    mem.program.map(0x4000, 0x5FFF,
+        [&mem](uint16_t addr) -> uint8_t {
+            return mem.video.vram[addr - 0x4000];
+        },
+        [&mem](uint16_t addr, uint8_t data) {
+            mem.video.vram[addr - 0x4000] = data;
+        },
+        "VideoRAM");
+
+    // Magic RAM: 0x6000-0x7FFF
+    // Reads from VRAM at (addr - 0x6000). Writes go through 74181 ALU.
+    mem.program.map(0x6000, 0x7FFF,
+        [&mem](uint16_t addr) -> uint8_t {
+            return mem.video.vram[addr - 0x6000];
+        },
+        [&mem](uint16_t addr, uint8_t data) {
+            magic_ram_write(mem.video, addr - 0x6000, data);
+        },
+        "MagicRAM");
+
+    // Color RAM: 0x8000-0xBFFF (2KB at 0x8000, mirrored)
+    mem.program.map(0x8000, 0xBFFF,
+        [&mem](uint16_t addr) -> uint8_t {
+            return mem.video.color_ram[addr & 0x07FF];
+        },
+        [&mem](uint16_t addr, uint8_t data) {
+            mem.video.color_ram[addr & 0x07FF] = data;
+        },
+        "ColorRAM");
+
+    // Unmapped: 0xC000-0xFFFF
+    mem.program.map_unconnected(0xC000, 0xFFFF, "unmapped-high");
+
+    // -- I/O space regions --
+
+    <<io sound ports>>
+    <<io second sound board>>
+    <<io input ports>>
+    <<io video control ports>>
+    <<io dip switches>>
+
+    return true;
+}
+@
+
+\subsection{I/O: Sound Ports (0x40--0x47)}
+
+Ports 0x40--0x43, 0x45, 0x47 are Exidy 6840 timer registers.  Port 0x44
+is the S14001A speech chip.  Port 0x46 is the SFX control latch.
+
+<<io sound ports>>=
+    // Exidy 6840 timer: 0x40-0x43, 0x45, 0x47
+    // S14001A speech: 0x44
+    // SFX latch: 0x46
+    mem.io.map(0x40, 0x47,
+        [&mem](uint16_t addr) -> uint8_t {
+            uint8_t port = addr & 0xFF;
+            if (port == 0x44) {
+                return s14001a_read(mem.sound);
+            }
+            return exidy6840_read(mem.sound, port);
+        },
+        [&mem](uint16_t addr, uint8_t data) {
+            uint8_t port = addr & 0xFF;
+            if (port == 0x44) {
+                s14001a_write(mem.sound, data);
+            } else if (port == 0x46) {
+                sfx_latch_write(mem.sound, data);
+            } else {
+                exidy6840_write(mem.sound, port, data);
+            }
+        },
+        "Audio");
+@
+
+\subsection{I/O: Second Sound Board (0x50--0x57)}
+
+Ports 0x50--0x57 are mapped to a second sound board connector on the
+Berzerk PCB.  This board is initialized by the boot code but not used
+in the standard game.  MAME maps them as no-op read/write.
+
+<<io second sound board>>=
+    mem.io.map(0x50, 0x57,
+        [](uint16_t) -> uint8_t { return 0xFF; },
+        [](uint16_t, uint8_t) {},
+        "Sound2-unused");
+@
+
+\subsection{I/O: Input Ports (0x48--0x4A)}
+
+These are read-only input ports.  All bits default to high (no buttons
+pressed, active-low logic).
+
+<<io input ports>>=
+    mem.io.map_rom(0x48, 0x48,
+        [&mem](uint16_t) -> uint8_t { return mem.input.port_48; },
+        "P1-input");
+
+    mem.io.map_rom(0x49, 0x49,
+        [&mem](uint16_t) -> uint8_t { return mem.input.port_49; },
+        "System-input");
+
+    mem.io.map_rom(0x4A, 0x4A,
+        [&mem](uint16_t) -> uint8_t {
+            // Bit 7 = cabinet type: 1 = upright
+            return mem.input.port_4a | 0x80;
+        },
+        "P2-input");
+@
+
+\subsection{I/O: Video and Interrupt Control (0x4B--0x4F)}
+
+\begin{itemize}
+\item \textbf{0x4B}: Magic RAM control register (write sets ALU config, clears
+  shift latch, resets intercept flag).
+\item \textbf{0x4C}: NMI enable.  Both read and write enable NMI.
+\item \textbf{0x4D}: NMI disable.  Both read and write disable NMI.
+\item \textbf{0x4E}: Read intercept flag (bit 7) and V256 (bit 0).
+\item \textbf{0x4F}: IRQ enable.  Write bit 0: 1=enabled, 0=disabled.
+\end{itemize}
+
+<<io video control ports>>=
+    // Magic RAM control: 0x4B (write only)
+    mem.io.map(0x4B, 0x4B,
+        [](uint16_t) -> uint8_t { return 0xFF; },
+        [&mem](uint16_t, uint8_t data) {
+            mem.video.magic.control = data;
+            mem.video.magic.last_shift_data = 0;
+            mem.video.magic.intercept = 1;
+        },
+        "MagicRAM-ctrl");
+
+    // NMI enable: 0x4C (read and write both enable NMI)
+    mem.io.map(0x4C, 0x4C,
+        [&mem](uint16_t) -> uint8_t {
+            mem.interrupts.nmi_enabled = true;
+            return 0x00;
+        },
+        [&mem](uint16_t, uint8_t) {
+            mem.interrupts.nmi_enabled = true;
+        },
+        "NMI-enable");
+
+    // NMI disable: 0x4D (read and write both disable NMI)
+    mem.io.map(0x4D, 0x4D,
+        [&mem](uint16_t) -> uint8_t {
+            mem.interrupts.nmi_enabled = false;
+            return 0x00;
+        },
+        [&mem](uint16_t, uint8_t) {
+            mem.interrupts.nmi_enabled = false;
+        },
+        "NMI-disable");
+
+    // Intercept + V256: 0x4E (read only)
+    mem.io.map_rom(0x4E, 0x4E,
+        [&mem](uint16_t) -> uint8_t {
+            return read_intercept(mem.video);
+        },
+        "Intercept");
+
+    // IRQ enable: 0x4F (write only, bit 0)
+    mem.io.map(0x4F, 0x4F,
+        [](uint16_t) -> uint8_t { return 0xFF; },
+        [&mem](uint16_t, uint8_t data) {
+            mem.interrupts.irq_enabled = (data & 0x01) != 0;
+        },
+        "IRQ-ctrl");
+@
+
+\subsection{I/O: DIP Switches and LED (0x60--0x7F)}
+
+Ports 0x60--0x67 are mirrored at +0x08, +0x10, +0x18.  DIP switch
+values are returned as defaults (English language, standard coinage).
+
+<<io dip switches>>=
+    mem.io.map(0x60, 0x7F,
+        [](uint16_t addr) -> uint8_t {
+            switch (addr & 0x07) {
+                case 0: return 0x00;  // F3: English, no test modes
+                case 1: return 0xC0;  // F2: bonus 5000+10000
+                case 2: return 0x00;  // F6: 1C/1C
+                case 3: return 0x00;  // F5: 1C/1C
+                case 4: return 0x00;  // F4: 1C/1C
+                case 5: return 0x00;  // SW2
+                case 6: return 0x00;  // LED off
+                case 7: return 0x00;  // LED on
+                default: return 0xFF;
+            }
+        },
+        [](uint16_t, uint8_t) {},
+        "DIP-LED");
+@
+
+
+\end{document}

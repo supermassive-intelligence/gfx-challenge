@@ -1,0 +1,247 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Sound Subsystem (Stubs)}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The Berzerk sound hardware has two independent subsystems:
+
+\begin{itemize}
+\item \textbf{S14001A speech synthesis chip}: plays digitized speech from a
+  4~KB voice ROM.  Controlled via I/O port 0x44 (data/control write, busy
+  read).
+\item \textbf{Exidy custom sound board}: a Motorola 6840 Programmable Timer
+  Module driving a noise/tone generator circuit.  Accessed via I/O ports
+  0x40--0x43, 0x45, 0x47 (timer registers) and 0x46 (SFX control latch).
+\end{itemize}
+
+This module provides \textbf{stub implementations} for Phase 4.  The I/O
+register behavior is correct enough that the game code will not hang on
+polling loops (the S14001A busy flag clears immediately, the 6840 registers
+accept reads and writes).  No actual audio generation occurs.  Real audio
+will be added in a later phase.
+
+\section{Header}
+
+<<sound.h>>=
+#ifndef BERZERK_SOUND_H
+#define BERZERK_SOUND_H
+
+#include <cstdint>
+#include <array>
+
+<<s14001a state struct>>
+<<exidy 6840 state struct>>
+<<sound state struct>>
+<<sound function declarations>>
+
+#endif // BERZERK_SOUND_H
+@
+
+\section{Data Structures}
+
+\subsection{S14001A Speech Chip State}
+
+The S14001A has a busy flag, the current word address being spoken, a
+volume setting, and a clock divisor.  For the stub, we only need [[busy]]
+to satisfy the game's polling loop and the register values for
+observability.
+
+<<s14001a state struct>>=
+struct S14001AState {
+    bool busy = false;
+    uint8_t word_addr = 0;     // 6-bit word address (0-63)
+    uint8_t volume = 0;        // 3-bit volume (0-7)
+    uint8_t clock_div = 16;    // divisor (16 - (control & 7))
+};
+@
+
+\subsection{Exidy 6840 Timer State}
+
+The 6840 has 8 registers (3 timers with control, count, and latch registers
+plus a status register).  The SFX control latch selects the sound effect.
+For the stub we store the register file and the latch value.
+
+<<exidy 6840 state struct>>=
+struct Exidy6840State {
+    std::array<uint8_t, 8> regs;
+    uint8_t sfx_latch = 0;
+
+    Exidy6840State() {
+        regs.fill(0);
+    }
+};
+@
+
+\subsection{Combined Sound State}
+
+<<sound state struct>>=
+struct SoundState {
+    S14001AState speech;
+    Exidy6840State timer;
+    const uint8_t* voice_rom = nullptr;
+    uint32_t voice_rom_size = 0;
+};
+@
+
+\section{Function Declarations}
+
+<<sound function declarations>>=
+// Initialize sound state with voice ROM data pointer.
+void sound_reset(SoundState& sound, const uint8_t* voice_rom, uint32_t size);
+
+// S14001A speech chip I/O.
+void s14001a_write(SoundState& sound, uint8_t data);
+uint8_t s14001a_read(const SoundState& sound);
+
+// Exidy 6840 timer I/O.
+void exidy6840_write(SoundState& sound, uint8_t port, uint8_t data);
+uint8_t exidy6840_read(const SoundState& sound, uint8_t port);
+
+// SFX control latch (port 0x46 write).
+void sfx_latch_write(SoundState& sound, uint8_t data);
+@
+
+\section{Implementation}
+
+<<sound.cpp>>=
+#include "sound.h"
+
+<<sound reset implementation>>
+<<s14001a write implementation>>
+<<s14001a read implementation>>
+<<exidy6840 write implementation>>
+<<exidy6840 read implementation>>
+<<sfx latch write implementation>>
+@
+
+\subsection{Sound Reset}
+
+Clear all state and store the voice ROM pointer.
+
+<<sound reset implementation>>=
+void sound_reset(SoundState& sound, const uint8_t* voice_rom, uint32_t size)
+{
+    sound.speech = S14001AState{};
+    sound.timer = Exidy6840State{};
+    sound.voice_rom = voice_rom;
+    sound.voice_rom_size = size;
+}
+@
+
+\subsection{S14001A Write}
+
+Port 0x44 write has a mode field in bits 7--6:
+
+\begin{itemize}
+\item \texttt{00}: Load word address from bits 5--0 and trigger playback.
+  In the stub, we set the word address but immediately clear busy (since
+  we are not actually playing audio).
+\item \texttt{01}: Set volume (bits 5--3) and clock divisor (bits 2--0).
+  Divisor is [[16 - (data \& 0x07)]].
+\item \texttt{10}, \texttt{11}: Unused modes, ignored.
+\end{itemize}
+
+<<s14001a write implementation>>=
+void s14001a_write(SoundState& sound, uint8_t data)
+{
+    uint8_t mode = (data @>> 6) & 0x03;
+    switch (mode) {
+    case 0:
+        // Trigger playback of word at address (bits 5-0)
+        sound.speech.word_addr = data & 0x3F;
+        // Stub: set busy briefly. Since we have no timing, clear it
+        // immediately.  If games spin-wait too tightly, we may need
+        // a cycle counter here.
+        sound.speech.busy = false;
+        break;
+    case 1:
+        // Volume and clock divisor
+        sound.speech.volume = (data @>> 3) & 0x07;
+        sound.speech.clock_div = 16 - (data & 0x07);
+        break;
+    default:
+        // Modes 2 and 3 are unused
+        break;
+    }
+}
+@
+
+\subsection{S14001A Read}
+
+Port 0x44 read returns the busy status in bit 6.  When busy, bit 6 is
+clear (0x00).  When ready (not busy), bit 6 is set (0x40).  All other
+bits read as 0.
+
+<<s14001a read implementation>>=
+uint8_t s14001a_read(const SoundState& sound)
+{
+    // Bit 6: 0 = busy, 0x40 = ready
+    return sound.speech.busy ? 0x00 : 0x40;
+}
+@
+
+\subsection{Exidy 6840 Timer Write}
+
+Ports 0x40--0x43, 0x45, 0x47 map to the 6840 timer registers.  Port
+addresses are decoded as offsets into the 8-register file.  The stub
+simply stores the written value.
+
+The offset mapping from I/O port to register index:
+\begin{itemize}
+\item Port 0x40 $\rightarrow$ offset 0
+\item Port 0x41 $\rightarrow$ offset 1
+\item Port 0x42 $\rightarrow$ offset 2
+\item Port 0x43 $\rightarrow$ offset 3
+\item Port 0x45 $\rightarrow$ offset 5
+\item Port 0x47 $\rightarrow$ offset 7
+\end{itemize}
+
+<<exidy6840 write implementation>>=
+void exidy6840_write(SoundState& sound, uint8_t port, uint8_t data)
+{
+    uint8_t offset = port - 0x40;
+    if (offset < 8) {
+        sound.timer.regs[offset] = data;
+    }
+}
+@
+
+\subsection{Exidy 6840 Timer Read}
+
+Returns the stored register value.  On real hardware, some registers
+(like the status register) have more complex read behavior, but the
+stub is sufficient for the game to proceed past initialization.
+
+<<exidy6840 read implementation>>=
+uint8_t exidy6840_read(const SoundState& sound, uint8_t port)
+{
+    uint8_t offset = port - 0x40;
+    if (offset < 8) {
+        return sound.timer.regs[offset];
+    }
+    return 0xFF;
+}
+@
+
+\subsection{SFX Control Latch Write}
+
+Port 0x46 write sets the sound effect control latch.  Bits 7--6 select
+the function.  The stub stores the value for observability.
+
+<<sfx latch write implementation>>=
+void sfx_latch_write(SoundState& sound, uint8_t data)
+{
+    sound.timer.sfx_latch = data;
+}
+@
+
+\end{document}

@@ -1,0 +1,239 @@
+\documentclass{article}
+\usepackage{noweb}
+\usepackage[margin=1in]{geometry}
+
+\title{Berzerk Emulator: Interrupt Timing}
+\author{Literate Implementation}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\section{Overview}
+
+The Berzerk hardware fires 10 interrupts per frame: 2 IRQs and 8 NMIs at
+specific scanline positions.  The game code depends on these interrupts for
+timing, input polling, and sound updates.
+
+Rather than using host-side timers (as MAME does with screen.time\_until\_pos),
+we use cycle-count scheduling.  Each frame is approximately 41,918 Z80
+T-states (262 scanlines $\times$ 320 pixels $\div$ 2 pixels/T-state).  We
+pre-compute a sorted table of 10 events with their cycle offsets, then call
+[[cpu.execute()]] in chunks, firing the appropriate interrupt at each
+boundary.
+
+\subsection{Scanline Timing}
+
+\begin{itemize}
+\item Pixel clock: 5.000~MHz
+\item Pixels per line: 320
+\item Lines per frame: 262
+\item CPU clock: 2.500~MHz (pixel clock / 2)
+\item T-states per scanline: $320 / 2 = 160$
+\item T-states per frame: $262 \times 160 = 41{,}920$
+\end{itemize}
+
+The V-counter counts scanlines from 0 to 261.  Visible lines are 32--255
+(V-counter values 0x20--0xFF with V256=0).  Lines 256--261 and 0--31 are
+the vblank region (V256=1 for lines $\ge$256, but the counter wraps).
+
+\subsection{Interrupt Positions}
+
+The 10 events, sorted by cycle offset:
+
+\begin{verbatim}
+Type  V-counter  V256  Scanline  Cycle Offset
+NMI   0x30       0     48        7,680
+NMI   0x50       0     80        12,800
+NMI   0x70       0     112       17,920
+IRQ   0x80       0     128       20,480
+NMI   0x90       0     144       23,040
+NMI   0xB0       0     176       28,160
+NMI   0xD0       0     208       33,280
+NMI   0xF0       0     240       38,400
+NMI   0xF0       1     ~256      40,960
+IRQ   0xDA       1     ~vblank   41,600
+\end{verbatim}
+
+For V256=0 events, the scanline number equals the V-counter value.  For
+V256=1 events, the scanline is approximately 256 + (V-counter - 0xE8),
+though the exact mapping depends on the sync chain counter conversion.  We
+use fixed cycle offsets derived from MAME's timer scheduling.
+
+\section{Header}
+
+<<interrupts.h>>=
+#ifndef BERZERK_INTERRUPTS_H
+#define BERZERK_INTERRUPTS_H
+
+#include <cstdint>
+
+<<frame constants>>
+<<interrupt state struct>>
+<<frame event struct>>
+<<frame event table>>
+<<run frame declaration>>
+
+#endif // BERZERK_INTERRUPTS_H
+@
+
+\section{Constants}
+
+<<frame constants>>=
+static constexpr int CYCLES_PER_SCANLINE = 160;
+static constexpr int SCANLINES_PER_FRAME = 262;
+static constexpr int CYCLES_PER_FRAME = CYCLES_PER_SCANLINE * SCANLINES_PER_FRAME;
+// = 41,920
+
+static constexpr int VBLANK_END = 0x20;     // line 32
+static constexpr int VBLANK_START = 0x100;   // line 256
+
+static constexpr uint8_t IRQ_VECTOR = 0xFC;  // placed on data bus during INTA
+@
+
+\section{Data Structures}
+
+\subsection{Interrupt State}
+
+Tracks whether IRQ and NMI are enabled.  The game toggles these via I/O
+ports 0x4C/0x4D (NMI) and 0x4F (IRQ).
+
+We also count how many IRQs and NMIs were actually fired per frame for
+diagnostic purposes.
+
+<<interrupt state struct>>=
+struct InterruptState {
+    bool nmi_enabled = false;
+    bool irq_enabled = false;
+
+    // Diagnostics (reset each frame)
+    int irq_count = 0;
+    int nmi_count = 0;
+};
+@
+
+\subsection{Frame Event}
+
+Each event in the per-frame table specifies a cycle offset and the type
+of interrupt to fire.
+
+<<frame event struct>>=
+enum class IntType : uint8_t { NMI, IRQ };
+
+struct FrameEvent {
+    int cycle_offset;
+    IntType type;
+    uint8_t vcounter;   // for V256 tracking
+    bool v256;          // whether this event is in vblank region
+};
+@
+
+\subsection{Event Table}
+
+The 10 events are defined as a compile-time constant array, sorted by
+cycle offset.
+
+<<frame event table>>=
+static constexpr int NUM_FRAME_EVENTS = 10;
+
+static constexpr FrameEvent FRAME_EVENTS[NUM_FRAME_EVENTS] = {
+    //  cycle    type          vcounter  v256
+    {  7680,    IntType::NMI, 0x30,     false },
+    { 12800,    IntType::NMI, 0x50,     false },
+    { 17920,    IntType::NMI, 0x70,     false },
+    { 20480,    IntType::IRQ, 0x80,     false },
+    { 23040,    IntType::NMI, 0x90,     false },
+    { 28160,    IntType::NMI, 0xB0,     false },
+    { 33280,    IntType::NMI, 0xD0,     false },
+    { 38400,    IntType::NMI, 0xF0,     false },
+    { 40960,    IntType::NMI, 0xF0,     true  },
+    { 41600,    IntType::IRQ, 0xDA,     true  },
+};
+@
+
+\section{Frame Runner}
+
+The [[run\_frame]] function executes one full frame of Z80 code.  It runs
+the CPU in chunks between interrupt events, firing the appropriate
+interrupt at each boundary.  The function updates the video [[v256]] flag
+at each event to track the beam position for port 0x4E reads.
+
+The function is declared to take the CPU, interrupt state, and video state.
+The Z80 class is forward-declared here to avoid a circular include
+dependency; the implementation file includes both headers.
+
+<<run frame declaration>>=
+class Z80;
+struct VideoState;
+
+int run_frame(Z80& cpu, InterruptState& ints, VideoState& video);
+@
+
+\section{Implementation}
+
+<<interrupts.cpp>>=
+#include "interrupts.h"
+#include "z80.h"
+#include "video.h"
+
+<<run frame implementation>>
+@
+
+\subsection{Frame Execution}
+
+For each event in the sorted table, we run the CPU up to the event's cycle
+offset, then fire the interrupt if enabled.  After all events, we run the
+remaining cycles to complete the frame.
+
+The execute function may overshoot the requested cycle count (it finishes
+the current instruction).  We track the actual cycle count and adjust
+subsequent chunks accordingly.
+
+<<run frame implementation>>=
+int run_frame(Z80& cpu, InterruptState& ints, VideoState& video)
+{
+    ints.irq_count = 0;
+    ints.nmi_count = 0;
+
+    int cycles_done = 0;
+
+    for (int i = 0; i < NUM_FRAME_EVENTS; i++) {
+        const FrameEvent& ev = FRAME_EVENTS[i];
+
+        // Run CPU up to this event's cycle position
+        int target = ev.cycle_offset;
+        if (cycles_done < target) {
+            cycles_done += cpu.execute(target - cycles_done);
+        }
+
+        // Update V256 for port 0x4E reads
+        video.v256 = ev.v256;
+
+        // Fire interrupt if enabled
+        if (ev.type == IntType::NMI) {
+            if (ints.nmi_enabled) {
+                cpu.nmi();
+                ints.nmi_count++;
+            }
+        } else {
+            if (ints.irq_enabled) {
+                cpu.irq(IRQ_VECTOR);
+                ints.irq_count++;
+            }
+        }
+    }
+
+    // Run remaining cycles to complete the frame
+    if (cycles_done < CYCLES_PER_FRAME) {
+        cycles_done += cpu.execute(CYCLES_PER_FRAME - cycles_done);
+    }
+
+    // After all events, we are in vblank region
+    video.v256 = true;
+
+    return cycles_done;
+}
+@
+
+\end{document}
