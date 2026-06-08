@@ -44,6 +44,7 @@ class LLMJudge(Protocol):
         input_messages: list[dict],
         output_message: dict,
     ) -> bool: ...
+
     """Independent quality re-check for an emitted SFT example (spec
     sections 5/7/12.8). Returns True if the proposed output is a reasonable
     training example for the given context; False to flag a disagreement."""

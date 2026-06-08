@@ -36,7 +36,6 @@ from traj_pipeline.judge import LLMJudge
 from traj_pipeline.load import Step
 from traj_pipeline.scoring import ScoredStep
 
-
 DEFAULT_VALIDITY_THRESHOLD = 0.5
 DEFAULT_USEFULNESS_THRESHOLD = 0.5
 
@@ -101,7 +100,9 @@ def _find_fix(
     # Tier 3: cross-tool LLM backstop on the first candidate.
     j_first, c_first = candidates[0]
     intervening = [
-        ss.step for ss in scored_steps[buggy_idx + 1 : j_first] if ss.step.kind == "action"
+        ss.step
+        for ss in scored_steps[buggy_idx + 1 : j_first]
+        if ss.step.kind == "action"
     ]
     if judge.resolves(buggy.step, c_first.step, intervening):
         return j_first

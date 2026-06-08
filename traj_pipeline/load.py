@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-
 StepKind = Literal["user_text", "assistant_text", "action", "tool_result"]
 Role = Literal["user", "assistant"]
 

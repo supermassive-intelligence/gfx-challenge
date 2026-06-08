@@ -32,7 +32,9 @@ class EmitResult:
     dpo_answer_rejected_skipped: int = 0
 
 
-def _prefix_messages(spans: list[Span], end: int, system_prompt: str | None) -> list[dict]:
+def _prefix_messages(
+    spans: list[Span], end: int, system_prompt: str | None
+) -> list[dict]:
     msgs: list[dict] = []
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})

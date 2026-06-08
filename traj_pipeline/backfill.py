@@ -25,7 +25,6 @@ from traj_pipeline.load import Step
 from traj_pipeline.reasoning import ReasoningWriter
 from traj_pipeline.scoring import ScoredStep
 
-
 # Labels whose actions are "kept" and therefore get a preceding reasoning.
 # ``redundant`` and ``dead_end`` actions are not kept; compressed_out actions
 # are explicitly excluded too.
@@ -47,13 +46,18 @@ class BackfillResult:
     reflections: dict[int, str] = field(default_factory=dict)
 
 
-def _find_buggy_tool_result(scored_steps: list[ScoredStep], buggy_idx: int) -> Step | None:
+def _find_buggy_tool_result(
+    scored_steps: list[ScoredStep], buggy_idx: int
+) -> Step | None:
     """Return the buggy step's own tool_result (the next step sharing source_part_id)."""
     if buggy_idx + 1 >= len(scored_steps):
         return None
     cand = scored_steps[buggy_idx + 1]
     buggy = scored_steps[buggy_idx]
-    if cand.step.kind == "tool_result" and cand.step.source_part_id == buggy.step.source_part_id:
+    if (
+        cand.step.kind == "tool_result"
+        and cand.step.source_part_id == buggy.step.source_part_id
+    ):
         return cand.step
     return None
 

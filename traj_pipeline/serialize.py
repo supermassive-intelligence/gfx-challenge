@@ -20,7 +20,9 @@ from traj_pipeline.load import Step
 
 
 def _arguments_json(args: dict | None) -> str:
-    return json.dumps(args or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(
+        args or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
 
 
 def map_tool_call(step: Step) -> dict[str, Any]:
@@ -43,7 +45,10 @@ def span_to_message(span: Span) -> dict[str, Any]:
     if span.kind in ("reasoning", "reflection", "answer"):
         return {"role": "assistant", "content": span.text or ""}
     if span.kind == "action":
-        call_id = span.provenance.get("call_id") or f"call_{span.provenance.get('step_id', '?')}"
+        call_id = (
+            span.provenance.get("call_id")
+            or f"call_{span.provenance.get('step_id', '?')}"
+        )
         return {
             "role": "assistant",
             "content": "",
@@ -59,7 +64,10 @@ def span_to_message(span: Span) -> dict[str, Any]:
             ],
         }
     if span.kind == "tool_result":
-        call_id = span.provenance.get("call_id") or f"call_{span.provenance.get('step_id', '?')}"
+        call_id = (
+            span.provenance.get("call_id")
+            or f"call_{span.provenance.get('step_id', '?')}"
+        )
         return {
             "role": "tool",
             "tool_call_id": call_id,

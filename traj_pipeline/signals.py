@@ -12,7 +12,6 @@ import re
 
 from traj_pipeline.load import Step
 
-
 # Generic error markers; not domain-specific. Looked up in tool_result text.
 ERROR_MARKERS: tuple[str, ...] = (
     "traceback",
@@ -75,7 +74,12 @@ _VERB_TO_TOOL: dict[str, set[str]] = {
 _TOOL_TOKEN_RE = r"(?:edit|write|bash|read|tool)"
 _COUNT_PATTERNS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(rf"\bsingle\s+({_TOOL_TOKEN_RE})(?:\s+call)?\b", re.IGNORECASE), 1),
-    (re.compile(rf"\bexactly\s+one\s+({_TOOL_TOKEN_RE})(?:\s+call)?\b", re.IGNORECASE), 1),
+    (
+        re.compile(
+            rf"\bexactly\s+one\s+({_TOOL_TOKEN_RE})(?:\s+call)?\b", re.IGNORECASE
+        ),
+        1,
+    ),
     (re.compile(rf"\bonly\s+one\s+({_TOOL_TOKEN_RE})(?:\s+call)?\b", re.IGNORECASE), 1),
 )
 
@@ -154,7 +158,12 @@ def syntactic(step: Step, following: list[Step]) -> float:
         args = step.args or {}
         old_s = args.get("oldString")
         new_s = args.get("newString")
-        if isinstance(old_s, str) and isinstance(new_s, str) and old_s == new_s and old_s != "":
+        if (
+            isinstance(old_s, str)
+            and isinstance(new_s, str)
+            and old_s == new_s
+            and old_s != ""
+        ):
             return 0.0
 
     return 1.0
@@ -327,7 +336,9 @@ def governed_actions(step: Step, trajectory_steps: list[Step]) -> list[Step]:
     ]
 
 
-def governing_user_text(step: Step, trajectory_steps: list[Step], task_goal: str) -> str:
+def governing_user_text(
+    step: Step, trajectory_steps: list[Step], task_goal: str
+) -> str:
     """Most recent ``user_text`` step in trajectory before ``step`` (section 11.3).
 
     Falls back to ``task_goal`` if no preceding user_text exists (should not

@@ -32,7 +32,9 @@ class Config:
     reasoning_granularity: str = "per_action"  # per_action | per_turn
     verify_sample_rate: float = 0.10
     answer_warn_chars: int = 8000
-    verifier_patterns: tuple[str, ...] = ()  # empty = use signals.DEFAULT_VERIFIER_PATTERNS
+    verifier_patterns: tuple[
+        str, ...
+    ] = ()  # empty = use signals.DEFAULT_VERIFIER_PATTERNS
 
     # Confirmed in planning round 4.
     system_prompt: str | None = None

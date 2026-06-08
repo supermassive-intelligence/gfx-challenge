@@ -174,8 +174,12 @@ def verify(
     rep.dropped_spans = max(0, total_scored - rep.kept_spans)
 
     # Section 12.5 / 6 invariants.
-    clean_action_spans = sum(1 for sp in all_spans if sp.kind == "action" and sp.loss_mask == 1)
-    recovery_buggy_spans = masked_actions  # all loss_mask=0 actions are buggy under our rules
+    clean_action_spans = sum(
+        1 for sp in all_spans if sp.kind == "action" and sp.loss_mask == 1
+    )
+    recovery_buggy_spans = (
+        masked_actions  # all loss_mask=0 actions are buggy under our rules
+    )
     if recovery_buggy_spans > 0:
         rep.success_vs_recovery_ratio = clean_action_spans / recovery_buggy_spans
     else:
@@ -209,7 +213,10 @@ def verify(
                     )
                 else:
                     bf_idx = scored_by_traj.index(scored)
-                    if linked_fix.step.step_id not in backfill_by_traj[bf_idx].reflections:
+                    if (
+                        linked_fix.step.step_id
+                        not in backfill_by_traj[bf_idx].reflections
+                    ):
                         rep.recoveries_preserved = False
                         rep.failures.append(
                             f"fix step {linked_fix.step.step_id} for buggy {ss.step.step_id} lacks reflection"
@@ -251,7 +258,8 @@ def verify(
     # real judge -- the mock would just say YES to everything.
     if judge_obj is not None:
         sample_size, disagreements = rejudge_sft_sample(
-            sft_examples, judge_obj,
+            sft_examples,
+            judge_obj,
             sample_rate=verify_sample_rate,
             seed=seed,
             using_mock=using_mock,
@@ -268,4 +276,6 @@ def verify(
 def write_report(out_dir: str | Path, report: VerificationReport) -> None:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     p = Path(out_dir) / "verification_report.json"
-    p.write_text(json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, indent=2))
+    p.write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, indent=2)
+    )

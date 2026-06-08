@@ -37,7 +37,6 @@ from traj_pipeline.judge import LLMJudge
 from traj_pipeline.load import Step
 from traj_pipeline.scoring import ScoredStep
 
-
 RedundancyMode = Literal["off", "collapse"]
 FailureMode = Literal["off", "conservative", "aggressive"]
 
@@ -181,7 +180,9 @@ def compress_trajectory(
     return scored_steps
 
 
-def _trajectory_action_signature_sequence(scored_steps: list[ScoredStep]) -> tuple[str, ...]:
+def _trajectory_action_signature_sequence(
+    scored_steps: list[ScoredStep],
+) -> tuple[str, ...]:
     """Tuple of action signatures in source order. Excludes non-action steps
     and any step that has already been flagged compressed_out or labeled
     redundant / dead_end."""
@@ -238,8 +239,7 @@ def redundancy_compress_across_trajectories(
         _trajectory_action_signature_sequence(s) for s in scored_by_traj
     ]
     eligible = [
-        bool(sigs[i]) and not _has_recovery(scored_by_traj[i])
-        for i in range(n)
+        bool(sigs[i]) and not _has_recovery(scored_by_traj[i]) for i in range(n)
     ]
 
     for i in range(n):

@@ -46,15 +46,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="conservative",
     )
     p.add_argument("--judge", default="mock")
-    p.add_argument("--no-llm", action="store_true",
-                   help="force mock judge / writer (Phase 1 default)")
-    p.add_argument("--dpo-granularity",
-                   choices=["canonical", "all", "first", "last"],
-                   default="canonical")
+    p.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="force mock judge / writer (Phase 1 default)",
+    )
+    p.add_argument(
+        "--dpo-granularity",
+        choices=["canonical", "all", "first", "last"],
+        default="canonical",
+    )
     p.add_argument("--strict-local", action="store_true")
     p.add_argument("--policy-threshold", type=float, default=0.5)
-    p.add_argument("--max-workers", type=int, default=1,
-                   help="parallel LLM call fan-out (1 = sequential)")
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="parallel LLM call fan-out (1 = sequential)",
+    )
     p.add_argument("--answer-weight", type=float, default=1.0)
     p.add_argument("--min-answer-chars", type=int, default=0)
     p.add_argument("--answer-warn-chars", type=int, default=8000)
@@ -93,7 +102,9 @@ def config_from_args(args: argparse.Namespace) -> Config:
     )
 
 
-def _build_backends(config: Config) -> tuple[LLMJudge, ReasoningWriter, PromptCache | None]:
+def _build_backends(
+    config: Config,
+) -> tuple[LLMJudge, ReasoningWriter, PromptCache | None]:
     """Choose mock or Anthropic backends based on config."""
     if config.no_llm or config.judge == "mock":
         return MockLLMJudge(), MockReasoningWriter(), None
@@ -151,13 +162,15 @@ def run(config: Config) -> dict:
             break
         try:
             scored = score_trajectory(
-                traj, judge,
+                traj,
+                judge,
                 policy_threshold=config.policy_threshold,
                 strict_local=config.strict_local,
                 max_workers=config.max_workers,
             )
             label_trajectory(
-                scored, judge,
+                scored,
+                judge,
                 validity_threshold=config.validity_threshold,
                 usefulness_threshold=config.usefulness_threshold,
             )
@@ -189,7 +202,8 @@ def run(config: Config) -> dict:
         try:
             bf = backfill(scored, writer, max_workers=config.max_workers)
             asm = assemble_trajectory(
-                scored, bf,
+                scored,
+                bf,
                 validity_threshold=config.validity_threshold,
                 min_answer_chars=config.min_answer_chars,
                 answer_weight=config.answer_weight,
@@ -214,7 +228,8 @@ def run(config: Config) -> dict:
         sft_examples.extend(emit_sft(asm.spans, system_prompt=config.system_prompt))
         if "dpo" in config.emit:
             pairs, skipped = emit_dpo(
-                asm.spans, scored,
+                asm.spans,
+                scored,
                 granularity=config.dpo_granularity,
                 system_prompt=config.system_prompt,
             )
@@ -228,7 +243,9 @@ def run(config: Config) -> dict:
     meta = {
         "pipeline_version": PIPELINE_VERSION,
         "judge": "mock" if using_mock else config.judge,
-        "reasoning_writer_model": "mock" if using_mock else config.reasoning_writer_model,
+        "reasoning_writer_model": (
+            "mock" if using_mock else config.reasoning_writer_model
+        ),
         "no_llm": using_mock,
         "input_path": config.input_path,
         "session_info_id": info.get("id"),
@@ -264,7 +281,11 @@ def run(config: Config) -> dict:
         llm_calls_used=llm_calls_used,
         max_llm_calls=config.max_llm_calls,
         judge="mock" if (config.no_llm or config.judge == "mock") else config.judge,
-        reasoning_writer_model="mock" if (config.no_llm or config.judge == "mock") else config.reasoning_writer_model,
+        reasoning_writer_model=(
+            "mock"
+            if (config.no_llm or config.judge == "mock")
+            else config.reasoning_writer_model
+        ),
         pipeline_version=PIPELINE_VERSION,
         judge_obj=judge,
         using_mock=(config.no_llm or config.judge == "mock"),

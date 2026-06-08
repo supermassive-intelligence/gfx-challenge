@@ -16,7 +16,6 @@ from traj_pipeline.judge import LLMJudge
 from traj_pipeline.load import Step
 from traj_pipeline.segment import Trajectory
 
-
 Label = Literal[
     "unscored",
     "clean_success",
@@ -105,7 +104,9 @@ def score_step(
 
     # Subgoal axis. Pass the action's own tool_result as ``outcome`` so the
     # judge can read it without scanning the lookahead.
-    own_outcome = following[0] if following and following[0].kind == "tool_result" else None
+    own_outcome = (
+        following[0] if following and following[0].kind == "tool_result" else None
+    )
     subgoal = judge.subgoal_score(trajectory.task_goal, step, own_outcome, following)
 
     # Section 12.2: local_validity = min(syntactic, policy_local, policy_gate).
@@ -135,7 +136,9 @@ def score_step(
     )
 
 
-def _prefetch_judge_calls(trajectory: Trajectory, judge: LLMJudge, max_workers: int) -> None:
+def _prefetch_judge_calls(
+    trajectory: Trajectory, judge: LLMJudge, max_workers: int
+) -> None:
     """Warm the judge's cache for every assistant step in parallel.
 
     Each ``score_step`` makes two LLM calls (``subgoal_score`` and
@@ -156,9 +159,7 @@ def _prefetch_judge_calls(trajectory: Trajectory, judge: LLMJudge, max_workers: 
             continue
         following = trajectory.steps[i + 1 :]
         own_outcome = (
-            following[0]
-            if following and following[0].kind == "tool_result"
-            else None
+            following[0] if following and following[0].kind == "tool_result" else None
         )
         governing = signals_mod.governing_user_text(
             s, trajectory.steps, trajectory.task_goal
@@ -174,7 +175,10 @@ def _prefetch_judge_calls(trajectory: Trajectory, judge: LLMJudge, max_workers: 
             futures.append(
                 ex.submit(
                     judge.subgoal_score,
-                    trajectory.task_goal, s, own_outcome, following,
+                    trajectory.task_goal,
+                    s,
+                    own_outcome,
+                    following,
                 )
             )
             futures.append(ex.submit(judge.policy_score, s, governing))
@@ -199,7 +203,9 @@ def score_trajectory(
     _prefetch_judge_calls(trajectory, judge, max_workers)
     return [
         score_step(
-            s, trajectory, judge,
+            s,
+            trajectory,
+            judge,
             policy_threshold=policy_threshold,
             strict_local=strict_local,
         )

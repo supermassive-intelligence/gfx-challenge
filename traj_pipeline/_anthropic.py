@@ -20,7 +20,6 @@ from traj_pipeline import PIPELINE_VERSION
 from traj_pipeline.cache import LLMCallBudgetExceeded, PromptCache, cache_key
 from traj_pipeline.load import Step
 
-
 DEFAULT_MODEL_ID = "claude-sonnet-4-6"
 DEFAULT_CACHE_DIR = Path(".cache/traj_pipeline")
 
@@ -167,8 +166,7 @@ class AnthropicLLMJudge:
     def _ask_bool(self, system_extra: str, user: str) -> bool:
         system = (
             "You are a precise binary classifier for a code-trace analysis "
-            "pipeline. Reply with exactly one word: YES or NO. "
-            + system_extra
+            "pipeline. Reply with exactly one word: YES or NO. " + system_extra
         )
         text = self.backend.ask(system=system, user=user, max_tokens=8)
         return _parse_yes_no(text)

@@ -35,7 +35,6 @@ from typing import Any, Literal
 from traj_pipeline.backfill import BackfillResult
 from traj_pipeline.scoring import ScoredStep
 
-
 SpanKind = Literal["user", "reasoning", "action", "tool_result", "reflection", "answer"]
 
 
