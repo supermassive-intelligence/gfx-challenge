@@ -5,21 +5,40 @@ Derived from MAME `src/mame/stern/berzerk.cpp`. This document serves as the auth
 ## 1. CPU & Clocks
 - **Type**: Z80
 - **Clock**: 2.5 MHz (`MASTER_CLOCK / 4` where `MASTER_CLOCK` is 10 MHz). [L162-163, L1172]
-- **Populated ROM Regions**: 14 KB total.
-    - ROM0: 0x0000 - 0x07FF (2KB) [L664]
-    - ROM1-5: 0x1000 - 0x3FFF (12KB) [L666]
-    - *Note: 0x0800 - 0x0BFF is NVRAM (2KB).* [L665]
+- **Populated ROM Regions**: 12 KB total.
+    - ROM0: 0x0000 - 0x07FF (2KB) [berzerk_map]
+    - ROM1-5: 0x1000 - 0x37FF (10KB) [L670]
+    - *Note: 0x0800 - 0x0BFF is NVRAM (1KB, 0x400 bytes), mirrored.* [L669]
+    - *Note: 0x3800 - 0x3FFF is the empty ROM6 socket -- a mapped ROM region with
+      no ROM loaded, so reads return MAME's unloaded-ROM fill 0xFF (distinct from
+      the truly-unmapped 0xC000+ which reads 0x00).* [L670]
+
+> Erratum (2026-06-12): an earlier revision of this section listed 14 KB
+> populated ROM, ROM1-5 as 0x1000-0x3FFF (12 KB), and NVRAM as 2 KB. Corrected
+> per Sudnya's review of the driver `berzerk_map` and the RC31A ROM-loading
+> table (only 6 program ROMs, 0x0000-0x37FF). See cdoc/decisions.md.
 
 ## 2. Memory Map (Program Address Space)
+Mirror notation is the MAME mirror mask. Ranges below are canonical (the base
+copy); a `mirror` makes the region also respond at the mirrored addresses.
+
 | Range | Size | Type | Access | MAME Line | Note |
 |-------|------|------|---------|-----------|------|
-| 0x0000-0x07FF | 2KB | ROM | R | L664 | ROM0 |
-| 0x0800-0x0BFF | 2KB | RAM | R/W | L665 | NVRAM (Mirrored from 0x0400) |
-| 0x1000-0x3FFF | 12KB | ROM | R | L666 | ROM1-5 |
-| 0x4000-0x5FFF | 8KB | RAM | R/W | L667 | VRAM (Direct) |
-| 0x6000-0x7FFF | 8KB | RAM | R/W | L668 | Magic RAM window (Writes trigger ALU) |
-| 0x8000-0x87FF | 2KB | RAM | R/W | L669 | Color RAM (Mirrored from 0x3800) |
-| 0xC000-0xFFFF | 12KB | N/A | None | L670 | Unpopulated (noprw) |
+| 0x0000-0x07FF | 2KB | ROM | R | berzerk_map | ROM0 |
+| 0x0800-0x0BFF | 1KB | RAM | R/W | L669 | NVRAM; mirror 0x0400 (also at 0x0C00-0x0FFF) |
+| 0x1000-0x37FF | 10KB | ROM | R | L670 | ROM1-5 |
+| 0x3800-0x3FFF | 2KB | ROM | R (fill) | L670 | ROM6 socket empty; unloaded ROM reads 0xFF, writes ignored |
+| 0x4000-0x5FFF | 8KB | RAM | R/W | berzerk_map | VRAM (direct bitmap) |
+| 0x6000-0x7FFF | 8KB | device | R/W | berzerk_map | Magic RAM window; writes trigger 74181 ALU, reads alias VRAM at (addr-0x2000) |
+| 0x8000-0x87FF | 2KB | RAM | R/W | L673 | Color RAM; mirror 0x3800 (responds through 0xBFFF) |
+| 0xC000-0xFFFF | 16KB | unmapped | None | L674 | noprw(); reads 0x00, writes ignored |
+
+Two distinct "nothing there" fill values, MAME debugger-verified 2026-06-12
+(berzerk loaded): an unloaded ROM byte reads 0xFF (`print b@3800`, the empty
+ROM6 socket -> ROM_UNLOADED_FILL), while a truly-unmapped noprw() address reads
+0x00 (`print b@c000` -> UNMAPPED_FILL). Both constants live in
+machine/src/memory.js. Collapsing them would diverge from the oracle on any
+stray read at/above 0xC000.
 
 ## 3. I/O Port Map
 Global mask: `0xFF`. [L711]

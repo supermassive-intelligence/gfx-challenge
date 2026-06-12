@@ -1,136 +1,167 @@
 /**
- * Memory subsystem for the Berzerk machine.
+ * Memory subsystem for the Berzerk machine (program address space).
  *
- * Implements the address space defined in `cdoc/hardware-berzerk.md`.
- * Uses a TypedArray for main memory and dispatches accesses to handlers
- * for specific device windows.
+ * Mirrors the original hardware map exactly -- ported routines keep absolute
+ * addresses forever, so this layout is permanent API. Authoritative map:
+ * cdoc/hardware-berzerk.md Section 2 (which this module is checked against by
+ * tests/memory.test.js). The map below resolves the contract's mirror notes to
+ * MAME-style mirror masks and splits the program-ROM region at 0x37FF
+ * (0x3800-0x3FFF is the unpopulated ROM6 socket).
+ *
+ * Region kinds:
+ *   rom      - read-only; bytes come from a loaded ROM file; writes ignored.
+ *              An address inside a rom region with no loaded byte reads
+ *              ROM_UNLOADED_FILL (e.g. the empty ROM6 socket at 0x3800-0x3FFF).
+ *   ram      - read/write backing store.
+ *   device   - read/write backing store by default; a real device handler
+ *              (magic-RAM ALU etc.) is attached later via setHandler (T2.5+).
+ *   unmapped - noprw(); reads return UNMAPPED_FILL, writes ignored.
+ *
+ * Mirrored regions (NVRAM, color RAM) carry a MAME-style `mirror` mask: an
+ * address belongs to the region when its non-mirror, non-size bits equal the
+ * region base, and it indexes the region modulo its (power-of-two) size.
  */
 
-export const MEM_SIZE = 65536;
+// Two distinct "nothing there" mechanisms, both MAME-verified in the debugger
+// on 2026-06-12 (berzerk loaded):
+//   ROM_UNLOADED_FILL - an address inside a mapped ROM region with no ROM byte
+//     loaded. MAME fills the unloaded ROM with 0xFF. Verified: `print b@3800`
+//     (empty ROM6 socket) -> 0xFF.  [berzerk_map L670 + RC31A ROM table]
+//   UNMAPPED_FILL - a noprw() address that is not mapped at all; reads return
+//     the address space's default value 0x00. Verified: `print b@c000` -> 0x00.
+//     [berzerk_map L674]
+// These differ (0xFF vs 0x00); collapsing them would diverge from the oracle on
+// any stray read above 0xC000.
+export const ROM_UNLOADED_FILL = 0xff;
+export const UNMAPPED_FILL = 0x00;
 
-export const MAP = {
-  ROM0: { start: 0x0000, end: 0x0800 },
-  NVRAM: { start: 0x0800, end: 0x0C00 }, // Note: mirrored from 0x0400
-  ROM_MAIN: { start: 0x1000, end: 0x4000 }, // ROM1-5
-  VRAM: { start: 0x4000, end: 0x6000 },
-  MAGICRAM: { start: 0x6000, end: 0x8000 },
-  COLOR_RAM: { start: 0x8000, end: 0x8800 }, // Mirrored from 0x3800
-};
+export const MEM_SIZE = 0x10000;
+
+/**
+ * Canonical region table. `start`/`end` are the canonical (non-mirrored) range,
+ * end exclusive. `mirror` (optional) is the MAME mirror mask; mirrored regions
+ * have a power-of-two size (end - start). This is the single source of truth;
+ * tests derive expectations from it and cross-check it against §2 of the
+ * hardware contract.
+ */
+export const MAP = [
+  { name: 'ROM0',      start: 0x0000, end: 0x0800, kind: 'rom', rom: 'ROM0' },
+  { name: 'NVRAM',     start: 0x0800, end: 0x0c00, kind: 'ram', mirror: 0x0400 },
+  { name: 'ROM_MAIN',  start: 0x1000, end: 0x3800, kind: 'rom', rom: 'ROM_MAIN' },
+  { name: 'ROM6',      start: 0x3800, end: 0x4000, kind: 'rom', rom: 'ROM6' },
+  { name: 'VRAM',      start: 0x4000, end: 0x6000, kind: 'ram' },
+  { name: 'MAGICRAM',  start: 0x6000, end: 0x8000, kind: 'device' },
+  { name: 'COLOR_RAM', start: 0x8000, end: 0x8800, kind: 'ram', mirror: 0x3800 },
+  { name: 'UNMAPPED',  start: 0xc000, end: 0x10000, kind: 'unmapped' },
+];
+
+const BY_NAME = new Map(MAP.map((r) => [r.name, r]));
 
 export class Memory {
   constructor() {
-    this.ram = new Uint8Array(MEM_SIZE);
-    this.roms = new Map(); // regionName -> Uint8Array
-    this.taps = []; // Array of { range: {start, end}, callback: (addr, val, type) => void }
-    this.handlers = {
-      read: new Map(),
-      write: new Map(),
-    };
+    this.ram = new Uint8Array(MEM_SIZE); // backing store for ram/device regions
+    this.roms = new Map();               // region name -> Uint8Array
+    this.taps = [];                      // { start, end, callback }
+    this.handlers = [];                  // { start, end, read, write } (override)
   }
 
-  /**
-   * Load ROM data into a specific region.
-   * @param {string} regionName - Key from MAP
-   * @param {Uint8Array} data - ROM bytes
-   */
+  /** Load ROM bytes for a region (path/file plumbing lives in the caller). */
   loadRom(regionName, data) {
-    const region = MAP[regionName];
-    if (!region) throw new Error(`Unknown ROM region: ${regionName}`);
-    if (data.length > (region.end - region.start)) {
-      throw new Error(`ROM data too large for region ${regionName}`);
+    const region = BY_NAME.get(regionName);
+    if (!region || region.kind !== 'rom') throw new Error(`Not a ROM region: ${regionName}`);
+    if (data.length > region.end - region.start) {
+      throw new Error(`ROM data (${data.length}) too large for ${regionName} (${region.end - region.start})`);
     }
     this.roms.set(regionName, data);
   }
 
   /**
-   * Register a handler for a specific address range.
+   * Attach a device handler over an address window, overriding default region
+   * behavior. read(addr)->byte and/or write(addr,val). Used by T2.5+ to wire
+   * the magic-RAM ALU and other devices.
    */
-  setHandler(start, end, readFn = null, writeFn = null) {
-    if (readFn) this.handlers.read.set(start, { end, fn: readFn });
-    if (writeFn) this.handlers.write.set(start, { end, writeFn });
+  setHandler(start, end, read = null, write = null) {
+    this.handlers.push({ start, end, read, write });
   }
 
-  /**
-   * Add a trace tap for a range.
-   */
+  /** Register a trace tap: callback(addr, value, type) on any access in range. */
   addTap(start, end, callback) {
-    this.taps.push({ range: { start, end }, callback });
+    this.taps.push({ start, end, callback });
   }
 
   _fireTaps(addr, val, type) {
-    for (const tap of this.taps) {
-      if (addr >= tap.range.start && addr < tap.range.end) {
-        tap.callback(addr, val, type);
+    for (const t of this.taps) {
+      if (addr >= t.start && addr < t.end) t.callback(addr, val, type);
+    }
+  }
+
+  _handlerFor(addr) {
+    for (const h of this.handlers) {
+      if (addr >= h.start && addr < h.end) return h;
+    }
+    return null;
+  }
+
+  // Resolve an address to its region and physical index (handles mirrors).
+  _resolve(addr) {
+    for (const r of MAP) {
+      if (r.mirror !== undefined) {
+        const size = r.end - r.start;              // power of two
+        if ((addr & ~(r.mirror | (size - 1))) === r.start) {
+          return { region: r, index: addr & (size - 1) };
+        }
+      } else if (addr >= r.start && addr < r.end) {
+        return { region: r, index: addr - r.start };
       }
     }
+    return null; // map is total over 0x0000-0xFFFF, so this should not happen
   }
 
   read8(addr) {
-    addr &= 0xFFFF;
-
-    // 1. Check device handlers
-    for (const [start, { end, fn }] of this.handlers.read) {
-      if (addr >= start && addr < end) {
-        const val = fn(addr);
-        this._fireTaps(addr, val, 'read');
-        return val;
-      }
+    addr &= 0xffff;
+    const h = this._handlerFor(addr);
+    if (h && h.read) {
+      const v = h.read(addr) & 0xff;
+      this._fireTaps(addr, v, 'read');
+      return v;
     }
-
-    // 2. Check ROM regions
-    if (addr >= MAP.ROM0.start && addr < MAP.ROM0.end) {
-      const rom = this.roms.get('ROM0');
-      const val = rom ? rom[addr - MAP.ROM0.start] : 0xff;
-      this._fireTaps(addr, val, 'read');
-      return val;
+    const loc = this._resolve(addr);
+    let v;
+    if (loc.region.kind === 'rom') {
+      const rom = this.roms.get(loc.region.rom);
+      v = rom && loc.index < rom.length ? rom[loc.index] : ROM_UNLOADED_FILL;
+    } else if (loc.region.kind === 'unmapped') {
+      v = UNMAPPED_FILL;
+    } else {
+      v = this.ram[loc.region.start + loc.index];
     }
-    if (addr >= MAP.ROM_MAIN.start && addr < MAP.ROM_MAIN.end) {
-      const rom = this.roms.get('ROM_MAIN');
-      const val = rom ? rom[addr - MAP.ROM_MAIN.start] : 0xff;
-      this._fireTaps(addr, val, 'read');
-      return val;
-    }
-
-    // 3. Default to RAM
-    const val = this.ram[addr];
-    this._fireTaps(addr, val, 'read');
-    return val;
+    this._fireTaps(addr, v, 'read');
+    return v;
   }
 
   write8(addr, val) {
-    addr &= 0xFFFF;
-    val &= 0xFF;
-
-    // 1. Check device handlers
-    for (const [start, { end, writeFn }] of this.handlers.write) {
-      if (addr >= start && addr < end) {
-        writeFn(addr, val);
-        this._fireTaps(addr, val, 'write');
-        return;
-      }
-    }
-
-    // 2. ROM writes are ignored
-    if (addr >= MAP.ROM0.start && addr < MAP.ROM0.end) {
+    addr &= 0xffff;
+    val &= 0xff;
+    const h = this._handlerFor(addr);
+    if (h && h.write) {
+      h.write(addr, val);
       this._fireTaps(addr, val, 'write');
       return;
     }
-    if (addr >= MAP.ROM_MAIN.start && addr < MAP.ROM_MAIN.end) {
-      this._fireTaps(addr, val, 'write');
-      return;
+    const loc = this._resolve(addr);
+    // rom and unpopulated swallow writes; ram/device store (folded).
+    if (loc.region.kind === 'ram' || loc.region.kind === 'device') {
+      this.ram[loc.region.start + loc.index] = val;
     }
-
-    // 3. Default to RAM
-    this.ram[addr] = val;
     this._fireTaps(addr, val, 'write');
   }
 
   read16(addr) {
-    return this.read8(addr) | (this.read8(addr + 1) << 8);
+    return this.read8(addr) | (this.read8((addr + 1) & 0xffff) << 8);
   }
 
   write16(addr, val) {
-    this.write8(addr, val & 0xFF);
-    this.write8(addr + 1, (val >> 8) & 0xFF);
+    this.write8(addr, val & 0xff);
+    this.write8((addr + 1) & 0xffff, (val >> 8) & 0xff);
   }
 }

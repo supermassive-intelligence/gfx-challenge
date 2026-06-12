@@ -10,8 +10,8 @@ golden-frame gate passes. Source of truth for later phases: `cdoc/z80-port-plan.
 | T1.2 | Coverage feedback loop (traces → disasm)    | 1     | Phase 4       | blocked |
 | T2.1 | machine/ project scaffold + test runner     | 2     | none          | done    |
 | T2.2 | Extract hardware contract from berzerk.cpp  | 2     | none          | done    |
-| T2.3 | Z80 core: vendor + validate (ZEX + SST)     | 2     | T2.1          | awaiting-human |
-| T2.4 | Memory subsystem (address space)            | 2     | T2.1, T2.2    | pending |
+| T2.3 | Z80 core: vendor + validate (ZEX + SST)     | 2     | T2.1          | Verified by Sudnya. Done. |
+| T2.4 | Memory subsystem (address space)            | 2     | T2.1, T2.2    | done (verified by Sudnya 2026-06-12) |
 | T2.5 | Video: VRAM, magicram, color RAM, intercept | 2     | T2.4          | pending |
 | T2.6 | Interrupt & timing skeleton (NMI/IRQ)       | 2     | T2.3, T2.4    | pending |
 | T2.7 | Input ports + DIP switches                  | 2     | T2.4          | pending |

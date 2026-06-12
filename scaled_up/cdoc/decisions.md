@@ -137,3 +137,36 @@ Format: date — decision — rationale — decided by.
   X/Y flags) are therefore PROVABLY irrelevant to Berzerk, not just assumed.
   Caveat: re-run this grep if Phase 4 traces reveal code in the 3,567
   currently-unknown ROM bytes. — Sudnya (verified via Cowork session).
+
+## T2.4 — Memory subsystem (2026-06-12)
+
+- 2026-06-12 — CONTRACT ERRATUM (hardware-berzerk.md §1/§2), found while
+  implementing T2.4 and corrected against the driver berzerk_map + the RC31A
+  ROM-loading table:
+  * Program ROM is 12 KB populated, not 14 KB. ROM1-5 is 0x1000-0x37FF (10 KB,
+    five 2 KB ROMs) [L670], not 0x1000-0x3FFF (12 KB). 0x3800-0x3FFF is the
+    empty ROM6 socket: berzerk_map has no entry for it, so it falls through to
+    unmapped and reads the open-bus fill value; the RC31A table lists 0x3800 as
+    unpopulated.
+  * NVRAM at 0x0800-0x0BFF is 1 KB (0x400 bytes), mirrored by mask 0x0400 to
+    0x0C00-0x0FFF [L669] — the old "2 KB" label was wrong.
+  * Color RAM at 0x8000-0x87FF (2 KB) is mirrored by mask 0x3800, responding
+    through 0xBFFF [L673]. 0xC000-0xFFFF is unmapped/noprw [L674].
+  These ranges are permanent API (ported routines bake in absolute addresses),
+  so the map is the single source of truth: MAP lives in machine/src/memory.js
+  and tests/memory.test.js parses the §2 table and asserts MAP agrees with it.
+  — Sudnya (via Claude).
+
+- 2026-06-12 — RESOLVED (was OPEN): the "nothing there" fill bytes are MAME
+  debugger-verified, and there are TWO of them, not one. Sudnya ran (berzerk
+  loaded): `print b@3800` -> 0xFF and `print b@c000` -> 0x00. Two mechanisms:
+    * 0x3800-0x3FFF is the empty ROM6 socket -- a mapped ROM region with no ROM
+      loaded, which MAME fills with 0xFF. -> ROM_UNLOADED_FILL = 0xFF.
+    * 0xC000-0xFFFF is noprw() (truly unmapped); reads return the address
+      space's default 0x00. -> UNMAPPED_FILL = 0x00.
+  The session's provisional 0xFF was right for 0x3800 but WRONG for 0xC000 --
+  collapsing both into one 0xFF constant would have diverged from the oracle on
+  any stray read at/above 0xC000. This is exactly why the value was verified
+  rather than assumed. Both constants + pinning tests are in
+  machine/src/memory.js / tests/memory.test.js, and hardware-berzerk.md §2
+  distinguishes the two rows (ROM vs unmapped). — Sudnya (verified in MAME).
