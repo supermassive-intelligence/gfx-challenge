@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-# scaled_up/ -> repo root
+# scaled_up/disassembler/ -> repo root
 SCALED_UP = Path(__file__).resolve().parent
-REPO_ROOT = SCALED_UP.parent
+REPO_ROOT = SCALED_UP.parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 ORACLE = SCALED_UP / "oracle"
 

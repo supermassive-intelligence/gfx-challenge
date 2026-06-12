@@ -1,0 +1,11 @@
+# Machine .gitignore
+# ROMs and goldens
+fixtures/**/*.bin
+fixtures/**/*.jsonl
+
+# Large trace captures
+traces/*.bin
+traces/*.jsonl
+
+# Logs
+*.log
