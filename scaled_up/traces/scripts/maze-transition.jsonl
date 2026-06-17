@@ -1,0 +1,9 @@
+{"type":"header","game":"berzerk","version":1,"dips":{},"frames":1589}
+{"type":"input","frame":58,"port":"SYSTEM","field":"COIN1","value":1}
+{"type":"input","frame":63,"port":"SYSTEM","field":"COIN1","value":0}
+{"type":"input","frame":102,"port":"SYSTEM","field":"START1","value":1}
+{"type":"input","frame":111,"port":"SYSTEM","field":"START1","value":0}
+{"type":"input","frame":467,"port":"SYSTEM","field":"COIN1","value":1}
+{"type":"input","frame":473,"port":"SYSTEM","field":"COIN1","value":0}
+{"type":"input","frame":504,"port":"SYSTEM","field":"START1","value":1}
+{"type":"input","frame":508,"port":"SYSTEM","field":"START1","value":0}

@@ -1,0 +1,5 @@
+{
+  "_comment": "Maps sound.js events (cdoc/hardware-berzerk.md Section 7) to sample files in this directory. Populated from the MAME 0x44-write capture + audition (T2.8 HUMAN-GATE); see README.md. This file IS committed; the .wav files are NOT.",
+  "speech": {},
+  "sfx": {}
+}

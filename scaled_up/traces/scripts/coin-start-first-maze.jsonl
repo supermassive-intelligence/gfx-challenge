@@ -1,0 +1,5 @@
+{"type":"header","game":"berzerk","version":1,"dips":{},"frames":942}
+{"type":"input","frame":49,"port":"SYSTEM","field":"COIN1","value":1}
+{"type":"input","frame":59,"port":"SYSTEM","field":"COIN1","value":0}
+{"type":"input","frame":276,"port":"SYSTEM","field":"START1","value":1}
+{"type":"input","frame":286,"port":"SYSTEM","field":"START1","value":0}

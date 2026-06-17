@@ -30,7 +30,28 @@ export class Z80CPU {
 
   /** Execute one instruction (incl. prefixes/interrupt handling). Returns cycles. */
   step() {
+    const pc = this.pc;
+    if (this.sync_hook && pc === this.sync_hook) {
+      this.sync_callback();
+    }
+    const opcode = this.callbacks.readByte(pc);
+    if (this.trace_log) {
+      this.trace_log.push(`${pc.toString(16).padStart(4, '0')}:${opcode.toString(16).padStart(2, '0')}`);
+    }
     return this.core.run_instruction();
+  }
+
+  setSyncPoint(addr, callback) {
+    this.sync_hook = addr;
+    this.sync_callback = callback;
+  }
+
+  enableTrace() {
+    this.trace_log = [];
+  }
+
+  disableTrace() {
+    return this.trace_log;
   }
 
   reset() {

@@ -4,6 +4,8 @@
   "description": "JS machine for Stern Berzerk arcade port",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "replay": "node tools/replay_hash.js",
+    "diffhash": "node tools/diff_hashes.js"
   }
 }

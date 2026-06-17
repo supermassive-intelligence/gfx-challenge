@@ -9,3 +9,6 @@ traces/*.jsonl
 
 # Logs
 *.log
+
+# Speech/sound capture logs (large; regenerable via tools/mame/speechlog.lua) -- T2.8b
+speechlog.txt
