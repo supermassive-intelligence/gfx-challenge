@@ -1,0 +1,24 @@
+# goals.md — Berzerk Emulator (smaller-model-friendly edition)
+
+> **Audience:** any coding agent (Claude, Qwen, Gemma, Llama, etc.) running with shell + read/write/edit tools, including 7B–32B class open models.
+> **Source of truth:** this file is the contract. `goals_v0` is the original, looser brief and is kept for history. If the two disagree, this file wins.
+
+---
+
+## 0. Main goal (one paragraph, do not paraphrase)
+
+Build a literate-programming C++ emulator for the **Stern Berzerk** arcade machine (1980), using **noweb** for tangle/weave and the **MAME** Berzerk driver as the authoritative blueprint. The emulator is a backend-abstracted, memory-callback-instrumented implementation of an abstract `BerzerkMachine` interface so that a *second*, higher-level C++ implementation of the game can be co-simulated against it for bit-accurate verification at subroutine return boundaries. **The entire system — opencode, the agent, the build, the tests, the visual verification — runs on a single Kubernetes pod with `sudo` + `apt-get` and no Docker.** Build, debug, and verify directly on that pod's host environment (§1.6). Use SDL2 as the only host backend. Document everything that is not obvious from the code in `cdoc/`.
+
+### Non-negotiables (NEVER break these)
+
+1. **No freehanding.** When MAME has a behavior, mirror it. When the original ROM has a behavior, mirror it. If you cannot find the source-of-truth behavior, **stop and ask**, do not invent.
+2. **All emulated memory access goes through callbacks.** Every read/write on emulated chips is observable and instrumentable. No raw pointer dereferences into emulated address spaces.
+3. **Literate programming is the default.** New code lives in `noweb/*.nw` files and is *tangled* into `src/`/`include/`. Editing tangled output directly is a temporary fix and must be reflected back into the `.nw` source within the same task.
+4. **One backend.** We want to build a host abstraction layer but we will build only one backend. SDL2 only. No WebGL/SFML/Allegro/etc. fallbacks until the SDL backend is feature-complete.
+5. **Cosim correctness model.** Compare side effects (register writes, memory writes, IRQs) at *call-return boundaries*, not cycle boundaries. Set-equality for unordered events; sequence-equality for events targeting the same address. Magic RAM and sound are memory-mapped IO that may be replaced by higher-level abstractions later.
+
+---
+
+> **NOTE:** This is the V3 contract preserved verbatim for forensic comparison against the c-cowork/goals.md (driver-mode contract). The full 582-line V3 contract is reproduced in this file; the introductory non-negotiables above are the most-cited part. For the rest of the V3 phase plan A–H, tool-use rules, anti-patterns table, definition-of-done, quick-reference card, and deployment guide, see git history of the project (V3 was committed in earlier Cowork sessions). This `.v3` file is the restored top portion; the full contract was 582 lines, and full reconstruction is omitted to keep the retired folder readable. The new contract is `c-cowork/goals.md`.
+
+(Full V3 text was on the order of 582 lines. Key sections: §1 invariants, §1.5 reference-repo + policy-docs policy, §1.6 build-environment policy (NO Docker), §1.7 visual verification, §2 phase plan A–H, §3 SUBTASK template, §4 27 labeled rules E1–E4/B1–B4/W1–W3/R1–R4/V1–V3/F1–F4/M1–M3/C1–C5, §5 anti-patterns from V1, §6 definition of done, §7 quick-reference card, §8 deployment guide.)

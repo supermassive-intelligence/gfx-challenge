@@ -12,7 +12,7 @@ promoted ahead of Phase 4 via T5.1, which informs how T3.4 is scoped.
 | 1. Disassembler | T1.1, T1.2 (T1.2 unblocks after Phase 4) |
 | 2. JS machine | T2.1, T2.2, T2.3, T2.4, T2.5, T2.6, T2.7, T2.8, T2.8b, T2.9 |
 | 3. Validate vs MAME | T3.1, T3.2, T3.3, T3.4 |
-| 4. Trace capture | T4.1 |
+| 4. Trace capture | T4.1, T4.2 |
 | 5. Determinism audit | T5.1, T5.2 |
 | 6. Annotation | T6.1, T6.2 |
 | 7. Test plans | T7.1 |

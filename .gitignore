@@ -40,7 +40,7 @@ __pycache__/
 games/
 
 # Test data (cloned separately)
-tests/
+# tests/
 
 # Third-party headers (downloaded separately)
 third_party/

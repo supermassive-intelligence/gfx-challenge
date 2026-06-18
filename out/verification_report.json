@@ -1,0 +1,17 @@
+{
+  "dpo_answer_rejected_skipped": 0,
+  "dropped_spans": 67,
+  "empty_output_lines": 0,
+  "failures": [],
+  "judge": "mock",
+  "kept_spans": 120,
+  "llm_calls_used": 0,
+  "long_answer_spans": [],
+  "masked_action_count": 8,
+  "max_llm_calls": null,
+  "pipeline_version": "0.0.1",
+  "policy_axis_approximate": true,
+  "reasoning_writer_model": "mock",
+  "recoveries_preserved": true,
+  "success_vs_recovery_ratio": 1.625
+}

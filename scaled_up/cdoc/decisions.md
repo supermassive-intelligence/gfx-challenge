@@ -576,3 +576,321 @@ Format: date — decision — rationale — decided by.
   trace bench (hermetic, exact inputs->outputs, timing-independent). Two layers,
   two jobs. Phase-9 `npm run golden` asserts frames 0-258. T4.1 unblocked. —
   Sudnya.
+
+## T4.1 — Heavy-trace capture (2026-06-17, in_progress)
+
+- 2026-06-17 — HEAVY-TRACE built against the REAL JS-machine API (no invented
+  event API). Mechanism, all verified against src/ on disk:
+  * mem/IO capture = wrap the live `machine.cpu.callbacks.{readByte,writeByte,
+    readPort,writePort}` (the core dispatches through these by property lookup);
+    mem vs io tagged in each record. The adapter's extra opcode-peek
+    (z80.js step() does `callbacks.readByte(pc)` and the core re-fetches the same
+    byte) is suppressed once per step so read_set is the core's true sequence.
+  * per-instruction boundary = `scheduler.onStep` (fires before each cpu.step()).
+  * registers = `cpu.getState()`; F composed from the flag struct (no F byte in
+    the core). regs_in/out include a,f,b,c,d,e,h,l,ix,iy,sp,i,r + shadow set.
+  * cycles = sum of step() returns (core's cycle_counter resets per instruction,
+    z80_core.js L276-277, so it is NOT monotonic); informational only.
+- 2026-06-17 — INTERRUPT HANDLING (schema decision, frozen): an ISR is its OWN
+  invocation (is_isr:true, callerPC = interrupted PC, entryPC = handler). Not
+  merged into the interrupted invocation. Observed ISR entry vectors in attract:
+  0x0066 (NMI), 0x26ab (IM2 IRQ dispatcher), 0x0509 (early POST frame-IRQ
+  self-test handler — `out($4f); ei; jr self` waits, IRQ vectors to 0x0509).
+- 2026-06-17 — INVOCATION PAIRING = SP-depth, not blind pop-on-RET. Entry = a
+  CALL/CALL cc/RST that actually pushed (opcode in set AND SP-=2); exit = SP
+  rises above entry SP (covers RET/RET cc/RETI/RETN). KNOWN LIMITATION recorded
+  in the schema: routines that defeat stack discipline (MAN_INIT/LTABLE pop-then-
+  jp dispatch; CREATE_JOB 0x1E22 coroutine stack-swaps) are best-effort and may
+  mis-nest (the attract main loop surfaces as one oversized invocation,
+  entryPC=0x188b, >170k reads incl. a ~7k-iteration port-0x65 poll). Leaf/
+  arithmetic routines (RANDOM 0x2678) trace cleanly; coroutine scaffolding flagged
+  for explicit handling at port time.
+- 2026-06-17 — EVIDENCE (pasted into task Result + this session): CLI over
+  attract-only 3085 frames = 416,482 invocations; npm test 81/81 incl. the
+  determinism test (two runs byte-identical) and the read-set-order test;
+  correctness cross-check vs the frozen decode oracle = 0/391,352 non-ISR
+  callerPCs that are NOT a CALL/RST opcode. SCHEMA NOT YET FROZEN: the MAME
+  routine-level fidelity spot-check (DoD item) is still owed; T4.1 stays
+  in_progress (not awaiting-human/done) until it passes. — session; Sudnya to rule.
+- 2026-06-17 — INDEPENDENT VERIFICATION (Cowork review session): the above
+  evidence was reproduced from scratch, not taken on report. ROMs carved from
+  disassembler/oracle/berzerk_flat.bin (address-mapped 0x0000-0x3FFF) into the
+  five RC31 files; with BERZERK_ROM_DIR set: capture exit 0 / 416,482 invocations
+  (exact match), two independent runs byte-identical (cmp clean), heavy-trace.test
+  2/2 green (not skipped), and the callerPC cross-check reproduced exactly
+  (391,352 non-ISR / 25,130 ISR; 0 bad caller opcodes; ISR vectors 0x66 x20105,
+  0x509 x7, 0x26ab x5018). Script confirmed to use only real APIs. Verdict: T4.1
+  capture work is sound; proceed to the MAME fidelity spot-check.
+- 2026-06-17 — CONSUMPTION CAVEATS for T7/T8 added to schema §"Consumption notes"
+  (5 known characteristics, not bugs, to be honored before freeze): (1) read_set
+  includes instruction-fetch bytes (T7 decides whether to filter); (2) return-
+  address stack push/pop appears as stack noise; (3) magic-RAM (0x6000-0x7FFF)
+  writes record the CPU-written byte, NOT the post-74181-ALU stored byte (bench
+  needs the T2.5 model); (4) nested sub-call position is not marked in the parent
+  record (call graph via callerPC only); (5) stack-discipline-defeating routines
+  trace unreliably (use leaf routines for the spot-check). — Sudnya (via Cowork
+  review).
+
+## T4.2 — MAME routine-level fidelity spot-check (2026-06-17, awaiting-human)
+
+- 2026-06-17 — WINDOW REALITY (evidence, not the task's assumption): frames 0-258
+  (the T3.4 deterministic golden window) contain ZERO ordinary CALL/RET
+  invocations -- it is pure POST. JS heavy-trace cap sweep over attract-only:
+  cap=259/300/500 -> 0 invocations; cap=560 -> 21 (all ISRs: 0x0509 x7, 0x0066
+  x14); first ordinary routines ~frame 574. RANDOM 0x2678 first runs ~frame 982
+  and only 115x in the whole 3085-frame run. Frame indexing is identical to the
+  golden gate (both do reset(); for f {applyFrame(f); runFrame()}). So the task's
+  "pick routines wholly inside 0-258" is unsatisfiable, and routines that DO run
+  are past the deterministic window where the cores drift. — session; Sudnya ruled.
+- 2026-06-17 — PAIRING METHOD = STATE-KEYED (Sudnya): do NOT pair JS<->MAME by
+  frame/index (they drift after the window). Pair invocations of the same routine
+  by CONSUMED INPUTS (input registers the routine reads + its data reads), then
+  assert outputs match. Exclude R from key and diff (refresh counter). Treat SP as
+  net-delta, not absolute (and MAME updates SP mid-RET, so SP is excluded from the
+  verdict). Strip stack accesses (SP-window) and compare; for read_set, compare
+  data-only or account for note #6. This matches the T3.4 design rule that
+  gameplay-routine correctness is a hermetic, timing-INDEPENDENT bench.
+- 2026-06-17 — ROUTINES (4), all verified leaf + no-IO against the decode oracle:
+  RANDOM 0x2678 (LCG, required), 0x18e0 (pure leaf, two NVRAM reads -> A),
+  0x1ce7 (input regs H,L + djnz loop + ex af,af'), 0x287f (table scan, push/pop).
+- 2026-06-17 — LITERAL COMMANDS (reproducible):
+  JS:   BERZERK_ROM_DIR=<repo>/rom/berzerk node machine/tools/heavy_trace_capture.js \
+          traces/scripts/attract-only.jsonl /tmp/jsfull.jsonl   (416,482 invocations)
+  MAME: MAME_RT_OUT=/tmp/mame_rt_full.jsonl MAME_RT_TARGETS="6368,7399,9848,10367" \
+          MAME_RT_FRAMES=3085 mame -window -sound none -nothrottle -rompath <repo>/rom \
+          -cfg_directory ./cfg -nvram_directory ./nvram \
+          -autoboot_script ./routine_trace.lua berzerk
+          (machine/tools/mame/routine_trace.lua; 136,805 records:
+           6368:71162 7399:54597 9848:117 10367:10929)
+  DIFF: node machine/tools/routine_fidelity_diff.js /tmp/mame_rt_full.jsonl 3
+  MAME hook detail: whole-program read/write taps; entry only on a genuine opcode
+  fetch (PC == fetch addr -- rejects the POST ROM-checksum reading routine bytes
+  as data); SP-depth exit.
+- 2026-06-17 — VERDICT = PASS. RANDOM 0x2678, 0x18e0, 0x287f: ALL matched pairs
+  byte-EXACT on read_set (instruction fetches included), regs_out (excl R/SP), and
+  write_set. RANDOM LCG chain confirmed JS==MAME across seed states
+  0x0202 -> 0x3F61 -> 0xECFA -> 0xAC29 (16-bit seed @0x435C little-endian;
+  return = high byte). 0x1ce7: regs_out + write_set EXACT; read_set differed ONLY
+  by the not-taken conditional-relative-branch displacement bytes -- the schema
+  note #6 artifact (z80_core.js do_conditional_relative_jump; harmless, the byte
+  is unused when not taken). Pinned by machine/tests/jr-displacement.test.js
+  (npm test 83/83, 0 skipped, ROMs present).
+- 2026-06-17 — CONSEQUENCE: heavy-trace.md marked FROZEN; note #6 added. T4.1 and
+  T4.2 set to awaiting-human (HUMAN-GATE: Sudnya signs the freeze; neither flipped
+  to done by the session). Committed nothing. — session; Sudnya to ratify.
+
+## T5.2 — Full nondeterministic-read-site catalog (2026-06-17, awaiting-human)
+
+- 2026-06-17 — CATALOG built static + dynamic + reconciled into
+  cdoc/entropy-berzerk.md (supersedes the T5.1 stub). STATIC sweep of the frozen
+  decode oracle (decimal bytes): 65 IN instructions total = 54 `in a,(n)`
+  (DB nn = [219,nn]) + 11 `in a,(c)` (ED 78 = [237,120]). DYNAMIC capture wrapped
+  the live cpu.callbacks.readPort/readByte (same path the FROZEN heavy-trace
+  uses) over 4 scripts (attract 3085f / coin-start 942f / free-play 1276f w/
+  P1 joy+fire / aggressive start+hold 2600f), recording the exact reading PC
+  (= static_site+1) and value of every IO read plus mem reads of 0x089F/0x08A0/
+  0x435C. Heavy-trace reproduced T4.1 exactly (attract = 416,482 invocations).
+  RECONCILIATION: every dynamic IO read maps to a static site (PC-1); every
+  non-firing static site is explained by exactly 3 buckets, none entropy:
+  (a) operator service menus (COLOUR_TEST/INPUT_TEST/BOOKKEEPING, incl. ports
+  0x62/0x63/0x64 and all 11 `in a,(c)`); (b) active-gameplay routines not reached
+  (port 0x48 all sites; 0x4A in V.LOOP/MOVE_PLAYER); (c) the 6 `in a,($ff)` sites
+  at 0x1273+ are mis-disassembled DATA (0xFF is not a real port; 0 dynamic
+  reads). — session; Sudnya to ratify.
+- 2026-06-17 — ENTROPY = exactly one timing-locked source: port 0x4E **bit 0
+  (V256)**, consumed ONLY at the IM2 dispatcher 0x26B4 (`in a,($4e); rra; jr c`).
+  REFINEMENT vs T5.1: the OTHER port-0x4E reads do NOT read V256 — MOVE_AND_DRAW_
+  BOLT (0x157A `rlca`) and WRITE_PATTERN (0x279D `bit 7,a`) read **bit 7 = the
+  collision flop**, which is draw-deterministic (T2.5: set by control writes,
+  reset by overlapping pixels), NOT beam entropy. Bit layout confirmed from
+  video.js readIntercept: `((intercept^1)<<7) | (v256 & 0x7f)`. So the entropy
+  spine is V256(bit0)@0x26B4 → 2-byte interrupt-phase counter 0x089F/0x08A0
+  (advanced every non-vblank IRQ, mixing port 0x49) → LCG seed 0x435C → RANDOM
+  0x2678 → 13 consumers (movement V.LOOP, spawn SR.TAB/ROBOT_ANIMATION_TABLES,
+  game-start COLLISION_DETECTION, 3 speech routines). — session.
+- 2026-06-17 — CORRECTION to the T5.1 stub wording: COLLISION_DETECTION @0x1642
+  initializes the 0x089F/0x08A0 counter to **NOT(port 0x49)**, not to zero
+  (`in a,($49); cpl; ld (hl),a; ld (hl),a`). In attract with no coin/start
+  0x49=0xFF so NOT=0x00, which is why it *looked* like zeroing. entropy-berzerk.md
+  §3 states the general form. — session.
+- 2026-06-17 — FINDING (coverage limitation, evidence): NONE of the 4 stock
+  scripts credits the JS machine. The CPU does not poll the SYSTEM port (0x49)
+  until **frame 573** (POST completion; matches the cosim "first steady IRQ at JS
+  frame 573"), but every script injects coin/start at frames 60-530 and RELEASES
+  them before frame 573, so no credit registers, the game never leaves attract,
+  MOVE_PLAYER (0x1EE1) never runs, and port 0x48 is never read. Input PLUMBING is
+  verified correct (setField COIN1/START1/RIGHT toggle the right active-low bits),
+  so 0x48 etc. are confirmed deterministic INPUT sites, not dead code. CONSEQUENCE
+  for Phase 7/8: re-time coin/start to land after frame ~573 to capture the
+  port-0x48 gameplay reads. This is the deferred timing-parity work surfacing in
+  script authoring; it does not change any classification. — session.
+- 2026-06-17 — PHASE 7/8 INPUT CONTRACT (entropy-berzerk.md §6): the values a port
+  bench MUST replay (not recompute) are exactly (1) port 0x4E bit0 @0x26B4 (V256),
+  (2) the 0x089F/0x08A0 counter, (3) LCG seed 0x435C. Everything else is
+  reproducible from (cold reset + input script + DIPs + NVRAM): ports 0x48/0x49/
+  0x4A (inputs), DIPs 0x60-0x65, NVRAM 0x0800-0x0BFF (clear for hermetic bench),
+  0x44 (constant READY in our model; gates speech pacing only, never reaches
+  placement), 0x4C/0x4D (side-effect-only reads), and 0x4E bit7 (collision flop,
+  needs the T2.5 model not a replayed input). HUMAN-GATE: T5.2 ends at
+  awaiting-human; Sudnya signs that the catalog is complete. Committed nothing.
+  — session; Sudnya to ratify.
+
+## T6.1 — Annotation method + scope (2026-06-17)
+
+- 2026-06-17 — T6.1 METHOD RULE (Sudnya): annotate TRACE-DRIVEN FROM SCRATCH.
+  Names/contracts derived only from observed behavior (read/write addresses
+  cross-referenced to hardware-berzerk.md + entropy-berzerk.md, argument
+  registers, call-graph position, effects). The published Berzerk/Frenzy source,
+  seanriddle berzerk.asm, AND the existing disassembler/oracle/labels.json are
+  the T6.2 GRADING RUBRIC ONLY — not inputs. Refines the 2026-06-10 "Frenzy =
+  rubric" decision by explicitly adding labels.json to the rubric side, so the
+  T6.2 accuracy score stays a real test of the source-less method.
+- 2026-06-17 — T6.1 SCOPE (Sudnya): annotate the 81 distinct routines the
+  current attract trace reaches (work bottom-up, leaves first). Gameplay routines
+  (robot AI/movement/collision) are NOT trace-reachable yet — the scripts release
+  coin/start before frame ~573 so the machine never enters credited play
+  (entropy-berzerk.md §4). Capturing gameplay needs re-timed scripts; that is a
+  FOLLOW-UP (widens coverage for a second annotation pass), NOT a blocker on T6.1.
+
+- 2026-06-17 — T6.1 RESULT/DECISIONS (session; Sudnya to ratify at the HUMAN-GATE):
+  - Deliverables: cdoc/annotated-asm-berzerk.md (83 routines: name + contract +
+    purpose + entropy flag + disasm) and cdoc/ram-map-berzerk.md (RAM variable
+    map). Generators + a validated Z80 disassembler in machine/tools/t61/.
+  - COUNT: the attract trace reaches 83 distinct entry PCs, not exactly 81. The
+    delta is 8 SHARED-TAIL SECONDARY ENTRY POINTS (0x1505<-0x14F3, 0x1E78<-0x1E6D,
+    0x1F94<-0x1F91, 0x22F1<-0x22EB, 0x29A3<-0x29A1, 0x2A4A<-0x2A40, 0x2B3D<-0x2B39,
+    0x2BE4<-0x2BDE) — a normal Z80 multi-entry idiom, confirmed by disasm-span
+    containment. Counting shared bodies once ~= 75; counting all entry points = 83.
+    "81" in the scope note was approximate; nothing was invented or dropped.
+  - DISASSEMBLER: wrote a Z80 disassembler (machine/tools/t61/z80dis.js) validated
+    5286/5288 vs decode_oracle.jsonl. The 2 diffs are the oracle printing signed
+    decimal `cp -2`/`cp -4` where the canonical form is `cp $fe`/`cp $fc` — the
+    disassembler is correct; flagging in case T1.2/T6.2 compare against the oracle.
+  - VRAM-AS-VARIABLES: the low VRAM band 0x4000-0x43FF is reused as coroutine
+    STACKS (SP set to 0x4300/0x4400/0x0840/0x085E/0x0870) and scalar game vars
+    (0x4344-0x437A), NOT visible bitmap. Documented in the RAM map so a future
+    porter doesn't mistake these for screen writes.
+  - ENTROPY cross-check: 8 routines flagged entropy-touching, all consistent with
+    entropy-berzerk.md (V256 dispatcher 0x26AB; collision-flop draws 0x1553/0x272D
+    — deterministic; RANDOM 0x2678; seed/RANDOM consumers 0x1685/0x2540/0x25EB/0x1E59).
+  - Confidence flags: conf H/M/L; the conf-L routines (higher-level game label is a
+    best guess) are listed in the doc header and must NOT be treated as authoritative.
+  - Committed nothing. T6.1 ends at awaiting-human.
+
+## T6.2 — Annotation accuracy score (2026-06-18)
+
+- 2026-06-18 — T6.2 RESULT (session; Sudnya to ratify at HUMAN-GATE). Scored the
+  trace-only T6.1 names against the now-permitted rubric (labels.json + Scott
+  Tunstall's commented src/berzerk.asm, which carries Frenzy's ported comments).
+  Full analysis + per-routine verdict table: cdoc/t62-annotation-score.md.
+  Reproduce: `node machine/tools/t61/score.js`.
+- METHODOLOGY: map each of my 83 entry PCs to the canonical label at that exact
+  address (or the enclosing label + Tunstall comment if none); assign HIT
+  (semantic match) / PARTIAL (right subsystem+mechanism, wrong specific
+  role/entity/field) / MISS (wrong meaning) / NOLABEL (rubric has no distinct
+  label there -- my method split finer; judged by behavioural consistency).
+- SCORE: of the 48 routines the rubric names distinctly -> HIT 31 (65% exact),
+  PARTIAL 15, MISS 2; i.e. 96% landed in the correct subsystem, 4% (2) outright
+  wrong. Across all 83 (incl. 35 finer-grained-than-rubric): 60% correct, 33%
+  partial, 7% wrong. Entropy spine (T5.2) independently 100% correct.
+- NOTABLE MISSES (what trace-only CANNOT recover -- the generalizable result):
+  1. Slot-FIELD semantics: 0x2B3D SET_VELOCITY (writes VECTOR.X/Y) read as
+     SET_ANIM_FRAME -- a trace shows the write, not the field's type; the
+     consumer runs only in gameplay. (The 2 hard MISSes: 0x2B39/0x2B3D.)
+  2. Entity identity from attract-only: credits-vs-score (0x18E0/0x18CD/0x1908
+     are CMOS_CREDITS, I said score), player-vs-robot (0x1F91
+     CHANGE_PLAYER_DIRECTION said robot -- mechanism right, entity wrong).
+  3. Identical draw mechanism / different intent: 0x25CA/0x25D4/0x264C/0x2662
+     draw PLAYER LIFE ICONS via the same magic-RAM blit shape as maze walls ->
+     I labelled them DRAW_MAZE_* (4 NOLABEL "wrong"). Needs data-table content.
+  4. Trigger context: 0x2BE4 TRY_SPEAK_ON_PLAYER_LEAVING_ROOM -- got "random
+     speech" right, missed the trigger (gate 0x4371 never taken in attract).
+  Root cause of (2)-(4): the attract trace never enters credited play
+  (entropy-berzerk.md sec4); a re-timed gameplay script would recover most.
+- RECOVERED WELL: full bolt engine, magic-RAM draw pipeline, interrupt structure,
+  RANDOM (exact LCG), sound-effect triggers, job/coroutine creation, screen
+  clears, score-pointer select -- INCLUDING cases where the canonical label is
+  cryptic and the descriptive trace-name beat it (C.LOAD, RTOAX, SR.TAB, LTABLE,
+  CLEAR_CHYRON, SHOWO): a token-match scorer would under-credit these.
+- CAVEAT: HIT/PARTIAL/MISS are semantic judgement calls; the single percentage is
+  indicative, the cluster analysis is the durable finding. Committed nothing.
+
+## T7.1 — Test-plan generator + selection policy (2026-06-18)
+
+- 2026-06-18 — T7.1 (session; Sudnya to ratify). Tool:
+  machine/tools/generate_test_plan.js; schema FROZEN at cdoc/schemas/test-plan.md;
+  self-check: machine/tests/test-plan.test.js (in `npm test`); plans in
+  traces/test-plans/*.jsonl (one per input script).
+- REPLAY-BY-EXECUTION (design decision). A record is validated/consumed by
+  EXECUTING the routine on a fresh Z80 core against a mock memory (real ROM loaded
+  + writable-region reads seeded + IO served from an ordered per-port FIFO), not by
+  scripting the raw read_set. Consequence: the record's `reads` carry ONLY
+  writable-memory + IO reads; ROM code/operand fetches and ROM constant tables come
+  from the loaded ROM. This SIDESTEPS every heavy-trace read_set artifact:
+  code-fetch noise (note #1), the not-taken-JR displacement gap (note #6) -- the
+  core re-fetches from ROM so the gap never matters.
+- SELF-VALIDATING SELECTION (the selection policy). Every candidate invocation is
+  replayed during generation; ONLY records that reproduce regs_out + writes are
+  emitted. The plan therefore contains exclusively records proven replayable.
+- LEAF-FIRST is the EMERGENT consequence, not a heuristic. An invocation's
+  heavy-trace read/write sets EXCLUDE its callees' accesses (note #4), but a
+  standalone replay executes callees inline -- so a record self-validates only when
+  the invocation made no effectful sub-calls (a leaf, or a routine that took an
+  early-return path). Non-leaf invocations fail the self-check and are excluded.
+  This is exactly the Phase-9 bottom-up order; non-leaves become testable as their
+  children are ported (T9). Interrupted invocations are also excluded (the
+  interrupt's return-address push to sp-2 pollutes the write_set -- note #2).
+- `r` EXCLUDED from the regs comparison (kept in the record). The refresh register
+  is inflated by any interrupt that fired during the captured invocation and is
+  never load-bearing in Berzerk (entropy = port 0x4E/V256, not `ld a,r`; T5.1).
+  Without this, ~all interrupted-but-otherwise-clean leaf invocations would be
+  rejected on `r` alone (measured: dropped the false-mismatch count by ~75%).
+- IO normalized to the device port (low byte). The Z80 puts A (or B) on the high
+  address byte during IN/OUT; capture records the 16-bit bus addr. The schema and
+  self-check compare on (device-port, value), since the high byte is incidental
+  register content, not IO semantics.
+- DEDUP + CAP. path_id = FNV-1a of the executed PC sequence (precise control-flow
+  path). Keep one record per distinct path_id; cap at N distinct paths per routine
+  (default 8) to bound size; the cap is reported in stats, never silent.
+- STEP CAP MAX=50000 only bounds how fast non-returning (coroutine/stack-swap)
+  invocations are rejected; kept (returning) records are far shorter -- the
+  generator reports maxKeptPath so this stays verifiable (no legit routine is cut).
+- Committed nothing. T7.1 ends at awaiting-human (self-check green; Sudnya reviews
+  coverage + ratifies the leaf-first/`r`-exclusion policy before done).
+
+## T8.1 — Hermetic JS test bench (2026-06-18)
+
+- 2026-06-18 — T8.1 (session; Sudnya to ratify). Bench: machine/tools/bench.js;
+  sample port: machine/ports/random.js + ports/index.js registry; self-check:
+  machine/tests/bench.test.js (in `npm test`).
+- HERMETIC (DoD). bench.js imports ONLY node builtins + src/roms.js (a pure ROM
+  byte assembler, zero imports). No z80 core, no Machine. Verified by grep.
+- PORT CONTRACT. A ported routine is `port(ctx)` mutating ctx in place:
+  ctx.regs {a,b,c,d,e,h,l,ix,iy,+shadows}, ctx.flags/flags_p {S,Z,Y,H,X,P,N,C},
+  ctx.mem {r8,w8,r16,w16}, ctx.io {in,out}. The bench builds the mock memory from
+  the case (ROM image if available + writable read-seeds) and the IO FIFO, runs
+  the port, and diffs regs_out + writes. ports/index.js maps entry_pc -> port;
+  Phase 9 grows it bottom-up. Unported routines' cases are reported "skipped".
+- WHAT A REGISTER-TRANSFER PORT MUST NOT REPRODUCE (3 stripped quantities):
+  1. STACK scaffolding -- the routine's own push/pop of saved regs + the CALL
+     return address. The bench strips the contiguous block of mem accesses
+     descending from sp+1 (data lives at fixed addresses far from the live stack,
+     so the run stops at the first gap -- exact, no magic window). Only DATA writes
+     are compared.
+  2. `sp` -- a `ret` pops the return address, so captured regs_out.sp = regs_in.sp+2;
+     a register-transfer port leaves sp alone. Excluded from the regs compare.
+  3. `r` -- refresh register (same reason as T7.1).
+  EVERYTHING ELSE the port MUST match, including flags (full F byte incl.
+  undocumented Y/X) and registers the routine clobbers (e.g. RANDOM ends with
+  `ld de,$3153`, so a correct port sets DE=0x3153 -- the bench caught this exact
+  omission during bring-up, proving it is a real check, not a rubber stamp).
+- IO vs MEM writes compared as SEPARATE ordered streams: heavy-trace.md note #4
+  does not record the interleave order of a routine's mem-writes relative to its
+  io-writes, so the bench compares the two streams independently (each in order).
+- ROM is DATA, not the emulator: loaded as a byte image so ports that read ROM
+  constant tables work; optional (RANDOM needs none). Loading it does not violate
+  "no machine imported".
+- SAMPLE: RANDOM @0x2678 ported flag-accurate (S,Z,P preserved by ADD HL,rr; H,C
+  from the add; Y,X from the result high byte) -> passes 4/4 committed cases; a
+  deliberately-broken port exits non-zero (DoD). 396 other cases correctly skipped.
+- Committed nothing. T8.1 ends at awaiting-human.
