@@ -26,6 +26,7 @@ How it works (no auth required for public clips):
 This is the same endpoint and field set yt-dlp's MedalTV extractor uses, so
 behavior should track yt-dlp's.
 """
+
 import json
 import os
 import re
@@ -80,8 +81,11 @@ def stream_download(url: str, dest: str) -> None:
             done += len(chunk)
             if total:
                 pct = 100 * done / total
-                print(f"\r  {dest}  {done/1e6:6.1f} / {total/1e6:6.1f} MB  ({pct:5.1f}%)",
-                      end="", flush=True)
+                print(
+                    f"\r  {dest}  {done/1e6:6.1f} / {total/1e6:6.1f} MB  ({pct:5.1f}%)",
+                    end="",
+                    flush=True,
+                )
     print()
 
 
@@ -138,7 +142,9 @@ def main(argv: list[str]) -> int:
     # Video
     video_url = meta.get("contentUrl")
     if not video_url or "video/privacy-protected-guest" in video_url:
-        print("[*] contentUrl missing or guest-protected; falling back to socialVideoUrl")
+        print(
+            "[*] contentUrl missing or guest-protected; falling back to socialVideoUrl"
+        )
         video_url = fallback_video_url(slug)
 
     if not video_url:

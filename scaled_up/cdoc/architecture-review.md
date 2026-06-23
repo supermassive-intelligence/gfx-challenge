@@ -1,4 +1,8 @@
-# Berzerk Z80→JS Port — Architecture Review, Phases 1–6
+# Berzerk Z80→JS Port — Architecture Review
+
+**Covers:** Phases 1–8 (through 2026-06-18). This is a living document — extend it as
+later phases complete. (2026-06-18: trace model clarified to two tiers — lightweight
+interactive capture → heavyweight replay; see Phase 4.)
 
 **Audience:** an architect picking this project up. This explains *what* was built,
 *why* the key decisions were made, *what* went wrong, and *which* discoveries changed
@@ -55,9 +59,9 @@ drift between two different (both correct) Z80 cores, surfacing through the game
   rows only, frames 0–258. This is a strong *boot/integration/render regression* (the
   self-test exercises memory, video, and the magic-RAM ALU hard). It is **not** a
   proof of gameplay equivalence, and it never can be.
-- **Gate 2 — Gameplay equivalence (Phase 8).** Each ported routine is proven against
-  its own captured trace by a hermetic, input-keyed bench that has no emulator and no
-  timing in the loop. This is where gameplay correctness actually lives.
+- **Gate 2 — Gameplay equivalence (Phase 8, now built).** Each ported routine is
+  proven against its own captured trace by a hermetic, input-keyed bench that has no
+  emulator and no timing in the loop. This is where gameplay correctness actually lives.
 
 The fidelity bar is therefore **behavioral, not cycle-exact.** We explicitly chose
 *not* to chase cycle-for-cycle parity (that rabbit hole opened when we vendored a
@@ -166,11 +170,62 @@ parity work.
 
 **Goal:** a byte-stable, per-routine record of program behavior to drive porting tests.
 
-**Built:** a heavyweight trace capturer that records, per subroutine invocation,
-entry PC, full register snapshot (incl. IX/IY/SP/shadows), the *ordered* read-set and
-write-set (memory and I/O tagged), cycle count, and caller PC (yielding the call
-graph). Attract run: 416,482 invocations, byte-identical across two runs (determinism
-proven). Schema frozen in `cdoc/schemas/heavy-trace.md`.
+**Two trace tiers (the intended model).** Tracing is two-stage:
+- A **lightweight trace** is an interactive, user-driven capture — the input/event log
+  only, no per-PC detail — cheap enough to record during live play. This is the tier
+  that reaches genuine gameplay (a human actually credits a coin and plays), and it is
+  the **durable, hard-to-regenerate artifact** (a real play session can't be trivially
+  re-authored). The hand-authored input scripts in `traces/scripts/` are lightweight
+  traces by another name, occupying the same pipeline slot; interactive capture is the
+  generalization (designed, not yet wired up).
+- A **heavyweight trace** is produced by **deterministically replaying a lightweight
+  trace through the instrumented machine** to extract per-invocation detail. Because the
+  replay re-executes a live, fully-stateful machine, the heavyweight pass has *all*
+  component state present and can record any of it on demand. Heavyweight traces are
+  therefore **regenerable caches** — if a later phase needs a field that wasn't
+  recorded (e.g. the magic-RAM latch), you re-run heavyweight capture over the *existing*
+  lightweight traces; you never re-do the session.
+
+**Per-PC component fidelity comes from seeded re-emulation, not from logging.** The
+heavyweight trace is *produced by deterministically re-emulating the lightweight trace*.
+If the lightweight trace seeds a bit-identical run and the emulator is deterministic and
+faithful, the re-emulation **reproduces every component-state change PC-by-PC by
+executing** — so per-PC component state is available on demand without being stored. This
+relocates the real requirement onto the **seed**:
+
+- The **lightweight trace must seed a bit-identical re-emulation.** From cold reset that
+  is just `(cold reset + input/event sequence)`. If interactive capture ever starts from
+  a non-cold state (a resume point, or with battery-backed NVRAM), the lightweight trace
+  must additionally snapshot the initial state the run depends on — *including component
+  latch state at the start point* — or the re-emulation diverges and the PC-by-PC
+  component changes won't match. This is the actual "to be safe" content of the
+  lightweight trace.
+
+**Recording component transitions turns out to be needed only for cross-machine
+divergence localization** — *not* for the bench, after checking the actual code/records
+(2026-06-18). A routine's contract is its **bus output** (the bytes/ports it writes), not
+the pixels: a draw routine writes sprite bytes, while the magic-RAM control register and
+74181 ALU only govern how those bytes are *transformed downstream*. So the hermetic bench
+correctly verifies draw routines at the bus level without an ALU model — pixel
+correctness is an emergent composition of (each routine's correct bus output) + (the
+caller setting the control, tested when that routine is verified) + (the shared 74181,
+already validated by Gate 1's boot self-test) + (preserved call order in Phase 9). The
+only consumer that genuinely benefits from logged component transitions is **cross-machine
+comparison** (you can't reproduce MAME's run from your lightweight trace, so localizing a
+JS↔MAME component divergence needs logging on both sides) — a debugging aid, not a
+correctness requirement. So the corrected hierarchy is: **seed (lightweight) → faithful
+deterministic re-emulation → reproduces all state PC-by-PC**; component-transition logging
+is optional and only for cross-emulator diagnosis.
+
+**Built (heavyweight capturer):** records, per subroutine invocation, entry PC, full
+register snapshot (incl. IX/IY/SP/shadows), the *ordered* read-set and write-set (memory
+and I/O tagged), cycle count, and caller PC (yielding the call graph). Attract run:
+416,482 invocations, byte-identical across two runs (determinism proven). Schema frozen
+in `cdoc/schemas/heavy-trace.md`. Note: heavyweight *capture* runs on the full
+instrumented machine, so it already reproduces component (e.g. magic-RAM) state during
+the pass — the open work is on the *consumers*: feed the hermetic bench either the ALU
+model or recorded component transitions so draw routines can be tested (see carry-forward).
+(Interactive lightweight capture is the other remaining piece of this tier.)
 
 **Design decision that mattered:** invocation boundaries are detected by **SP depth**
 (a routine closes when SP rises above its entry value), which uniformly handles
@@ -237,9 +292,14 @@ source-less games), and then *measure* how well that worked.
 and a RAM variable map for all 83 trace-reachable routines, ordered bottom-up.
 
 **The load-bearing method decision:** annotation was done **trace-driven from scratch**
-— the published Frenzy/Tunstall source *and* the project's own `labels.json` were
-treated as off-limits (rubric only). This is what makes the Phase-6 accuracy score a
-real test of the source-less method rather than a circular exercise.
+— the reference sources *and* the project's own `labels.json` were treated as off-limits
+(rubric only). This is what makes the Phase-6 accuracy score a real test of the
+source-less method rather than a circular exercise. (*Why a "Frenzy" reference exists for
+a Berzerk port:* Frenzy is Stern's 1982 sequel to Berzerk and runs essentially the same
+Z80 codebase, so its routines correspond; its better-documented source — carried into
+Scott Tunstall's commented `berzerk.asm` — is therefore a valid grading rubric for the
+trace-only annotation. It's a deliberate use of the shared-engine lineage, not a
+different game mistakenly referenced.)
 
 **Roadblock caught in review:** the first annotation pass auto-stamped the full
 entropy-variable list onto every entropy-flagged routine (e.g. tagging the pure-LCG
@@ -261,6 +321,80 @@ to the same known gap: attract never enters credited play. Notably, the descript
 trace-only names sometimes *beat* the cryptic canonical labels (`C.LOAD`, `SR.TAB`,
 `RTOAX`).
 
+### Phase 7 — Generate tests  *(done)*
+
+**Goal:** convert the heavyweight traces into hermetic, per-routine test cases.
+
+**Built:** `machine/tools/generate_test_plan.js`, a frozen schema
+(`cdoc/schemas/test-plan.md`), a self-check wired into `npm test`, and 400 test
+records spanning 47 distinct routines across five input scripts
+(`traces/test-plans/*.jsonl`).
+
+**The defining decision — validate by execution, not by scripting reads.** A record is
+consumed by *re-executing* the routine on a fresh Z80 core against a mock memory (real
+ROM loaded, writable-region reads seeded, I/O served from an ordered per-port FIFO),
+not by replaying the captured raw read-set. Because execution re-fetches code and ROM
+constants itself, this **dissolves every heavy-trace read-set artifact at once** — the
+code-fetch noise and the not-taken-`JR` displacement gap from Phase 4 simply stop
+mattering. This single choice retired several worries the earlier phases had flagged.
+
+**Self-validating selection → leaf-first is emergent, not a heuristic.** Every
+candidate invocation is replayed during generation; only those that reproduce
+`regs_out` + writes are emitted. An invocation's heavy-trace sets *exclude* its
+callees' accesses, but a standalone replay runs callees inline — so only leaf /
+early-return invocations self-validate. Non-leaf, ISR, and coroutine invocations fail
+the check and are deferred to Phase 9 bottom-up porting, exactly as the heavy-trace
+schema intended. Two documented policy calls: `r` is excluded from the comparison (it
+is interrupt-inflated and non-load-bearing per Phase 5; kept in the record but not
+asserted on), and I/O addresses are normalized to the device-port low byte (the Z80
+puts A/B on the high address bus — incidental, not I/O semantics).
+
+**Coverage ceiling (carried forward):** the 47 covered routines are the *attract* leaf
+set; 36 routines are non-leaf/ISR/coroutine and become testable bottom-up as their
+children port. The deeper ceiling is the same frame-573 gap from Phase 5 — the scripts
+never credit play, so genuinely gameplay-only routines aren't reached at all yet.
+
+**Verified independently:** the self-check was reproduced from carved ROMs, and the
+RANDOM records were re-checked against the LCG (`7·seed+0x3153`) — all correct,
+confirming the records carry true input→output facts, not just self-consistency.
+
+### Phase 8 — Test bench (Gate 2)  *(done)*
+
+**Goal:** run the test plans against hand-ported JS routines with **no emulator in the
+loop** — the instantiation of Gate 2.
+
+**Built:** `machine/tools/bench.js` (hermetic — imports only node builtins and the
+pure `src/roms.js`; no Z80 core, no Machine), the **port contract** `port(ctx)` that
+mutates `ctx.{regs, flags, mem, io}` in place, a `machine/ports/` registry mapping
+`entry_pc → port`, and a sample RANDOM port. Self-check wired into `npm test` (92/92).
+
+**The defining decision — three quantities a register-transfer port must NOT
+reproduce:** (1) **stack scaffolding** — the routine's own push/pop of saved registers
+and the CALL return address (the bench strips the contiguous block of memory accesses
+descending from `sp+1`, stopping at the first gap, and compares only data writes);
+(2) **`sp`** — a `ret` pops the return address, so the captured `regs_out.sp =
+regs_in.sp + 2` while a JS port leaves `sp` alone; (3) **`r`** — the refresh register,
+as in Phase 7. *Everything else must match*, including the full flags byte
+(undocumented Y/X) and every register the routine clobbers.
+
+**The bench is a genuine check, not a rubber stamp** — it caught a real porting bug
+during bring-up (RANDOM ends with `ld de,$3153`; the first port forgot to clobber DE).
+The stack-strip is a *heuristic* (contiguous block from `sp+1`, stop at first gap);
+it is safe while game data lives far from the live stack — true for the current leaf
+routines — but a routine that writes data *adjacent* to its stack frame could in
+principle have a real write stripped (a possible false-pass, never a false-fail).
+Flagged for revisit in Phase 9.
+
+**The "one port, two callers" principle (carry into Phase 9):** the same `port(ctx)`
+functions feed both this hermetic bench *and* the live in-machine hook (Phase 9). A
+routine is implemented once; the bench and the running machine share it via a thin
+adapter, so the tested code and the shipped code cannot drift apart.
+
+**Verified independently:** hermeticity confirmed by import inspection; the 6 bench
+tests and the RANDOM 4/4 pass reproduced from carved ROMs; and `ports/random.js` was
+read and confirmed a genuine register-transfer implementation (computes the LCG, sets
+flags from first principles) rather than one rigged to echo the expected record.
+
 ---
 
 ## 4. Cross-cutting decisions (and why)
@@ -274,12 +408,22 @@ trace-only names sometimes *beat* the cryptic canonical labels (`C.LOAD`, `SR.TA
 - **Block rather than guess on under-specified hardware.** Every Phase-2 spec gap was
   resolved from `berzerk.cpp`, never approximated. This is why traps (mixed DIP
   polarity, dual fill values, the wrong interrupt-scanline approximation) were caught.
-- **Schemas are frozen artifacts.** Input-script and heavy-trace schemas are frozen
-  once validated; changing one requires a decision-log entry and sign-off.
+- **Schemas are frozen artifacts.** Input-script, heavy-trace, and test-plan schemas
+  are frozen once validated; changing one requires a decision-log entry and sign-off.
 - **Entropy reads are inputs, never recomputed.** The frozen heavy-trace rule that
   keeps the per-routine bench timing-independent.
 - **Annotation from scratch.** Preserves the integrity of the generalization
   measurement.
+- **Validate tests by execution against real ROM** (Phase 7), not by scripting reads —
+  dissolves read-set artifacts and makes leaf-first selection emergent.
+- **One port, two callers** (Phase 8→9). A ported routine is written once and used by
+  both the hermetic bench and the live machine hook, so tested ≡ shipped.
+- **Two-tier traces: lightweight (durable) → heavyweight (regenerable).** The
+  lightweight interactive trace pins determinism (inputs + non-cold-reset initial
+  state) and is the artifact to preserve; the heavyweight trace is a replay-derived
+  cache that can be re-extracted with more fields at any time without re-doing the
+  session. Completeness lives in the lightweight tier, not in heavyweight field
+  hoarding.
 
 ---
 
@@ -296,8 +440,9 @@ Two process rules emerged from real failures and now govern the project:
   hardened after the Phase-4 episode where three consecutive status reports described
   work that wasn't on disk or couldn't have run. The countermeasure that worked:
   independently reproduce the claimed result against the actual files before accepting
-  it (e.g. carving the ROM from the oracle, re-running the capture, re-deriving the LCG
-  chain). Every sign-off in this project was verified this way, not taken on report.
+  it (carving the ROM from the oracle, re-running the capture/bench, re-deriving the
+  LCG chain, reading the port to confirm it isn't rigged). Every sign-off in this
+  project was verified this way, not taken on report.
 
 Also standing: **the human owns all git operations** — sessions commit nothing and end
 by summarizing the diff for human review.
@@ -314,67 +459,103 @@ by summarizing the diff for human review.
 | RNG seeded from the Z80 R register | `ld a,r` never appears; source is port 0x4E/V256 | Entropy catalog re-spined; explains the frame-242 divergence |
 | Compare routines inside the locked window | Frames 0–258 contain no ordinary routines | State-keyed (input) pairing instead of frame pairing |
 | Naive CALL/RET pairing for trace capture | Conditional rets, RETI/RETN, coroutine stack-swaps | SP-depth pairing; coroutine routines flagged as a known limit |
+| Test cases would replay the captured read-set | Read-sets carry capture artifacts | Validate-by-execution against real ROM; artifacts dissolve |
 | 8 distinct SFX + 1 speech clip | 1 SFX (fired 8×, multi-write burst) + a 4-word phrase | Audio split to non-blocking T2.8b; SFX key redesigned |
 | Prior project's "~256" interrupt scanline | Wrong (past screen bottom) | Re-derived correct NMI/IRQ cadence from source |
 
 ---
 
-## 7. Current state & carry-forward into Phases 7–10
+## 7. Current state & carry-forward into Phases 9–10
 
-**Done:** Phases 1–6. The machine boots and is playable; it is proven ≡ MAME on the
-boot window; we have deterministic per-routine traces, a complete entropy catalog, and
-annotated assembly + RAM map for every trace-reachable routine, with a measured
-confidence in that annotation.
+**Done:** Phases 1–8. The machine boots and is playable; it is proven ≡ MAME on the
+boot window (Gate 1); we have deterministic per-routine traces, a complete entropy
+catalog, annotated assembly + RAM map with a measured confidence, hermetic test cases
+for 47 leaf routines, and a bench (Gate 2) that demonstrably catches porting errors.
 
-**Next:** Phase 7 (generate per-routine test cases from traces + annotations) → Phase 8
-(the hermetic bench = Gate 2) → Phase 9 (swap routines Z80→JS one at a time, each
-guarded by its bench tests and the Gate-1 boot regression) → Phase 10 (remove the
-Z80 core; the rAF loop + JS interrupt cadence drive the game).
-
-**Phase 7 has in fact already begun (T7.1, `awaiting-human`)** with a design decision
-worth flagging here because it retires several Phase-4/6 worries: test records are
-validated and consumed by **replay-by-execution** — re-running the routine on a fresh
-core against a mock memory with the real ROM loaded — rather than by scripting the raw
-read-set. Because the core re-fetches code and ROM constants itself, this *sidesteps
-every heavy-trace read-set artifact at once* (code-fetch noise, the not-taken-JR
-displacement gap). The generator self-validates: only invocations whose replay
-reproduces `regs_out` + writes are emitted, which makes **leaf-first an emergent
-property** (a non-leaf's record excludes its callees' effects, so it fails self-check
-until its children are ported) rather than a hand-applied heuristic. The `r` register
-is excluded from the comparison and I/O is normalized to the device port — both for the
-reasons established in Phases 4–5. (T7.1 was signed off 2026-06-18 after independent
-verification — self-check reproduced and the RANDOM records re-checked against the LCG.)
+**Next:** Phase 9 — T9.1 (the port hook harness: run a JS port in place of the Z80
+routine at a CALL target, sharing live memory) then T9.2 (port routines bottom-up,
+one at a time, each guarded by its bench tests + the Gate-1 boot regression) — then
+Phase 10 (take the Z80 core out of the *native* run path so the game runs pure-JS,
+driven by the rAF loop + JS interrupt cadence — while **keeping the emulator as a
+separate build target**; see the Phase-10 build-target note below).
 
 **Carry-forward items an architect should hold:**
 
-1. **Re-timed input scripts.** Current scripts never credit play, so gameplay routines
-   are untraced and unannotated. Phases 7–9 need scripts that coin/start *after*
-   ~frame 573 to capture and port the gameplay half (robot AI, movement, collision).
-2. **Coroutine/job routines** defeat SP-depth trace pairing and yield mid-routine
+1. **The hook must charge the displaced routine's cycles** (the new Phase-9 design
+   decision). A native JS port runs in zero Z80 cycles; if the hook doesn't advance the
+   scheduler by the routine's cost, interrupt timing shifts, the V256 entropy changes,
+   and the machine diverges from its own un-hooked behavior. The strongest T9.1
+   acceptance test is *hooked ≡ un-hooked* (byte-identical frame hashes over a full
+   run), since a behaviorally-exact port must not change the machine's own output —
+   and that test only passes if cycle accounting is right.
+2. **Interactive lightweight capture + its schema (reach gameplay).** Current lightweight
+   traces are hand-authored scripts that never credit play, so gameplay routines (robot
+   AI, movement, collision) are untraced, unannotated, and untested. The designed-but-
+   unbuilt piece is interactive, user-driven lightweight capture — a human plays, the
+   input/event log is recorded, then heavyweight capture replays it. This is the single
+   most recurring carry-forward; it bounds Phases 6, 7, and 9 coverage.
+   **No formal lightweight-trace schema exists yet.** `cdoc/schemas/input-script.md`
+   (frozen) is the de-facto lightweight schema for the *cold-boot, hand-authored* case
+   (frame-indexed input events at the vblank boundary + DIP header + cold-reset start);
+   it must be promoted/extended into an interactive lightweight-trace schema and frozen
+   *before* interactive capture is built. The schema's central invariant is the seed
+   contract: it must pin everything needed for bit-identical re-emulation. Recommended
+   default = **cold-boot-only** capture (every session from reset), which satisfies the
+   seed contract by construction and makes the schema a thin extension of input-script.md
+   + capture provenance; pin NVRAM (record or require-cleared) since otherwise two
+   cold-boot sessions aren't identical. Only if *resume / mid-session* capture is ever
+   needed does the lightweight trace have to carry a full initial-state snapshot (NVRAM +
+   DIPs + component latch state) — i.e. a save-state — which is the one case the
+   latch-snapshot question actually bites.
+3. **Draw routines are covered at the bus level (checked 2026-06-18) — the real residual
+   is end-to-end gameplay pixels, = item 2.** Earlier this was flagged as a magic-RAM ALU
+   gap; the code/record check dissolved it. The bench compares pre-ALU CPU writes, but a
+   draw routine's contract *is* its bus output: DRAW_SPRITE (0x2817) writes sprite bytes
+   (control inherited from its caller, tested there); PRINT_CHAR (0x29db) writes its own
+   control (0x4B, captured). The 74181 ALU is shared downstream hardware validated by
+   Gate 1's boot self-test, and post-ALU read-backs are seeded from the read-set. So
+   per-routine bus correctness + correct ALU + preserved call order ⟹ correct pixels — no
+   ALU model and no component-transition recording needed in the bench. What's genuinely
+   untested is the *composition* during gameplay (multiple ported routines + ALU producing
+   the actual screen), purely because golden frames stop at frame 258 — i.e. the same
+   gameplay-coverage gap as item 2 (re-timed scripts), not a separate ALU issue.
+4. **Coroutine/job routines** defeat SP-depth trace pairing and yield mid-routine
    (`halt`). They are not pure input→output functions and need explicit handling when
-   ported (Phase 9).
-3. **Entropy reads and read-set artifacts** — largely handled by the Phase-7
-   replay-by-execution choice above (re-executing against ROM means code-fetch noise,
-   the not-taken-JR gap, and entropy-input replay are all subsumed). The residual point
-   stands for any tool that does *not* replay against ROM: don't trust raw aggregate
-   read/write sets for stack-swapping routines — prefer the disasm-grounded contracts.
-4. **Annotation contracts are trace-observed**, with the documented over-attribution
-   caveat for coroutine writes. Anything consuming the annotation (not the executed
-   trace) should lean on the disassembly where the two disagree.
-5. **The two gates are different jobs.** Phase-9 "golden frames stay green" only proves
-   boot/integration didn't regress; per-routine correctness comes from the bench.
+   ported (and are correctly excluded from the test plans until their children port).
+5. **The stack-strip heuristic** in the bench is safe today but could mask a write for
+   a routine whose data and stack frame interleave — revisit if that case appears.
+6. **The two gates are different jobs.** In Phase 9, "golden frames stay green" only
+   proves boot/integration didn't regress (the window doesn't even reach most ported
+   routines); per-routine correctness comes from the bench.
+
+**Phase-10 end state — two build targets (decided 2026-06-18; emulation is retained).**
+The project ships **two separate build targets from one codebase**:
+- the **native (pure-JS) target** — no Z80 core in the run path; the rAF loop + JS
+  interrupt cadence drive the ported routines. This is the shippable Berzerk.
+- the **emulator target** — the Z80 core in the loop (the machine as it exists through
+  Phase 9). Retained as a first-class build, not a debug afterthought.
+
+Both build from the shared machine code (memory, video, scheduler, the ported routines);
+the only difference is whether the Z80 interpreter is wired into the loop. The emulator
+target is **load-bearing, not a nicety**: it is the continuing **oracle** the native port
+is verified against (native ≡ emulator ≡ MAME), the engine that **regenerates** heavyweight
+traces / test plans from lightweight traces, and the way you **debug the native port** when
+it misbehaves (run the same input on both targets and diff). The flush test still applies
+to the native target: it has no interpreter to fall back to, so any unported routine errors
+loudly — exactly the Phase-10 acceptance that proves 100% routine coverage. So "remove the
+core" means *the native target drops it*, never *the project loses emulation*.
 
 **Reusability note:** only Phases 1–2 and 6 are game-specific. The disassembler +
 coverage loop, the machine's hardware-abstraction pattern, the trace instrumentation,
-the entropy-audit method, and the trace→test→swap→remove pipeline are intended to
-carry to the next Z80 title.
+the entropy-audit method, the validate-by-execution test generator, the hermetic
+bench, and the trace→test→swap pipeline (with the Z80 core retained as the verification
+oracle) are intended to carry to the next Z80 title.
 
 ---
 
 ## 8. Where everything lives (artifact index)
 
-The substantive documents produced across Phases 1–6, so an architect knows where to
-go for the next level of detail:
+The substantive documents/tools produced across Phases 1–8:
 
 **Plan & process**
 - `cdoc/z80-port-plan.md` — the 10-phase plan (substance of each phase).
@@ -391,8 +572,10 @@ go for the next level of detail:
 single source of truth for the memory map, video/magic-RAM, interrupt timing, and
 input/DIP behavior), `cdoc/phase2_summary.md`, and the machine itself under `machine/src/`.
 
-**Phase 3 (validation)** — `cdoc/schemas/input-script.md` (frozen), the golden-frame
-tooling under `machine/tools/` + `machine/tools/mame/`.
+**Phase 3 (validation)** — `cdoc/schemas/input-script.md` (frozen; also serves as the
+*cold-boot lightweight-trace schema*), the golden-frame tooling under `machine/tools/` +
+`machine/tools/mame/`. *Missing:* an interactive lightweight-trace schema + capture
+(carry-forward #2).
 
 **Phase 4 (trace capture)** — `cdoc/schemas/heavy-trace.md` (frozen; includes the
 consumption-notes / known-limitations section), `machine/tools/heavy_trace_capture.js`.
@@ -405,5 +588,8 @@ contracts, purposes, listings), `cdoc/ram-map-berzerk.md` (RAM variable map),
 `cdoc/t62-annotation-score.md` (the accuracy-score research result + miss catalogue),
 generators under `machine/tools/t61/`.
 
-**Phase 7 (in progress)** — `cdoc/schemas/test-plan.md` (frozen),
-`machine/tools/generate_test_plan.js`, plans under `traces/test-plans/`.
+**Phase 7 (test generation)** — `cdoc/schemas/test-plan.md` (frozen),
+`machine/tools/generate_test_plan.js`, the plans under `traces/test-plans/`.
+
+**Phase 8 (test bench / Gate 2)** — `machine/tools/bench.js` (hermetic), the
+`machine/ports/` registry + port contract, `machine/tests/bench.test.js`.

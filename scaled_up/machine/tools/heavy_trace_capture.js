@@ -62,7 +62,7 @@ function snapshot(st) {
  * @param {(inv:object)=>void} [opts.onInvocation]  stream sink; if absent, collected
  * @returns {{invocations: object[], frames: number}}
  */
-export function captureTrace({ romRead, scriptText, maxFrames, onInvocation }) {
+export function captureTrace({ romRead, scriptText, maxFrames, onInvocation, inclusive = false }) {
   const { header, records } = parseScript(scriptText);
   const machine = new Machine();
   machine.loadRoms(assembleRoms(romRead));
@@ -113,27 +113,41 @@ export function captureTrace({ romRead, scriptText, maxFrames, onInvocation }) {
   // true access sequence (no duplicated opcode fetch).
   let peek = null; // { pc, used }
 
+  // Attribution. Default (exclusive): an access belongs to the INNERMOST open frame
+  // only -- a routine's read/write set excludes its callees' accesses (heavy-trace.md
+  // note #4), so only leaves/early-returns self-validate (leaf-first). INCLUSIVE mode
+  // (T9.2 Option 2, decisions.md 2026-06-20): an access belongs to EVERY open frame, so
+  // each invocation's record is its full subtree closure. The generator's self-check
+  // replays the real routine with callees inline, so an inclusive composite record
+  // matches -> composites become hermetically bench-able. Leaves are unchanged (no
+  // children). An invocation interrupted mid-execution folds the ISR's accesses into its
+  // closure, which its interrupt-free replay cannot reproduce -> still excluded (as now).
+  const pushRead = (entry) => {
+    if (inclusive) { for (const fr of frames) fr.read_set.push(entry); }
+    else { const fr = curFrame(); if (fr) fr.read_set.push(entry); }
+  };
+  const pushWrite = (entry) => {
+    if (inclusive) { for (const fr of frames) fr.write_set.push(entry); }
+    else { const fr = curFrame(); if (fr) fr.write_set.push(entry); }
+  };
+
   cb.readByte = (addr) => {
     const val = origReadByte(addr) & 0xff;
     if (peek && !peek.used && (addr & 0xffff) === peek.pc) { peek.used = true; return val; }
-    const fr = curFrame();
-    if (fr) fr.read_set.push({ addr: addr & 0xffff, val, type: 'mem' });
+    pushRead({ addr: addr & 0xffff, val, type: 'mem' });
     return val;
   };
   cb.writeByte = (addr, v) => {
-    const fr = curFrame();
-    if (fr) fr.write_set.push({ addr: addr & 0xffff, val: v & 0xff, type: 'mem' });
+    pushWrite({ addr: addr & 0xffff, val: v & 0xff, type: 'mem' });
     return origWriteByte(addr, v);
   };
   cb.readPort = (port) => {
     const val = origReadPort(port) & 0xff;
-    const fr = curFrame();
-    if (fr) fr.read_set.push({ addr: port & 0xffff, val, type: 'io' });
+    pushRead({ addr: port & 0xffff, val, type: 'io' });
     return val;
   };
   cb.writePort = (port, v) => {
-    const fr = curFrame();
-    if (fr) fr.write_set.push({ addr: port & 0xffff, val: v & 0xff, type: 'io' });
+    pushWrite({ addr: port & 0xffff, val: v & 0xff, type: 'io' });
     return origWritePort(port, v);
   };
 

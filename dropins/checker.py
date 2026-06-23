@@ -61,7 +61,7 @@ def resolve_endpoint() -> tuple[str, str, str]:
             base_url = (provider.get("options") or {}).get("baseURL")
             full_model = cfg.get("model") or ""
             if full_model.startswith("scalarlm/"):
-                model = full_model[len("scalarlm/"):]
+                model = full_model[len("scalarlm/") :]
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -80,12 +80,13 @@ def resolve_endpoint() -> tuple[str, str, str]:
 
 # ---- rubric parsing ----------------------------------------------------------
 
+
 @dataclass
 class Rubric:
-    slug: str        # e.g. "rubric_robot_ai"
-    name: str        # e.g. "Robot AI"
-    files: list[str] # paths relative to repo root
-    body: str        # full markdown rubric
+    slug: str  # e.g. "rubric_robot_ai"
+    name: str  # e.g. "Robot AI"
+    files: list[str]  # paths relative to repo root
+    body: str  # full markdown rubric
 
     @classmethod
     def from_path(cls, path: Path) -> "Rubric":
@@ -116,6 +117,7 @@ def load_rubrics(filter_slug: str | None = None) -> list[Rubric]:
 
 
 # ---- file gathering ----------------------------------------------------------
+
 
 def read_source(rel_path: str) -> tuple[str, int]:
     """Returns (content, byte_count). Missing files are flagged in content."""
@@ -207,6 +209,7 @@ def parse_json_response(raw: str, slug: str) -> dict:
 
 # ---- main -------------------------------------------------------------------
 
+
 def main() -> int:
     if not DOCS_DIR.exists():
         print(f"docs/ not found at {DOCS_DIR}", file=sys.stderr)
@@ -218,7 +221,10 @@ def main() -> int:
     filter_slug = sys.argv[1] if len(sys.argv) > 1 else None
     rubrics = load_rubrics(filter_slug)
     if not rubrics:
-        print("No rubrics found. Expected files matching docs/rubric_*.md", file=sys.stderr)
+        print(
+            "No rubrics found. Expected files matching docs/rubric_*.md",
+            file=sys.stderr,
+        )
         return 1
 
     client = OpenAI(base_url=base_url, api_key=api_key)
@@ -249,8 +255,10 @@ def main() -> int:
     print("-" * 58)
     print(f"{'AVERAGE':<35} {avg:>5.2f}")
     print(f"\nFull JSON written to {SCORES_FILE.relative_to(REPO_ROOT)}")
-    print("Sanity check: if 'Source bytes' is 0, the rubric's Files: line "
-          "points at a path that does not exist — judge is scoring nothing.")
+    print(
+        "Sanity check: if 'Source bytes' is 0, the rubric's Files: line "
+        "points at a path that does not exist — judge is scoring nothing."
+    )
     return 0
 
 

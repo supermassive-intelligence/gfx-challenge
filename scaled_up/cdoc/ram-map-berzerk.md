@@ -67,15 +67,28 @@ Equal r/w counts on consecutive addresses = a 16-bit variable. e.g.
 
 #### VRAM low band 0x4000-0x43FF -- used as STACKS and GAME VARIABLES (not bitmap)
 
+**Provenance legend (added 2026-06-22).** This map was originally derived from the *attract*
+trace alone, where the game never credits/starts, so several gameplay-only scalars carried
+**inferred** labels that the first credited run (`traces/scripts/kill_robots.jsonl`) has now
+corrected or confirmed:
+- **[gameplay-confirmed]** -- behaviour observed directly in credited play (kill_robots).
+- **[attract-inferred]** -- label still rests on attract-only structure; NOT yet exercised in
+  credited play. Treat as a hypothesis until a credited trace moves it.
+
+The neighbouring `0x433x-0x434x` band carries the highest stale-label risk because it is the
+per-game state block copied at game start by `0x1685` and never meaningfully written in
+attract. Confirmed/flagged below; remaining members are flagged **[attract-inferred]** rather
+than re-guessed.
+
 | addr | name | meaning | r/w (attract) | written by |
 |---|---|---|---|---|
 | 0x4000 | `boot_post_flag` | Boot/POST-incomplete flag; NMI 0x0066 aborts to POST if nonzero. | r=20105 w=0 | (boot only) |
 | 0x40d4-0x43b2 | `actor_stacks_and_table` | Coroutine stacks (SP set to 0x4300/0x4400) and per-actor slot data live through here; reads/writes at +0x32 strides are actor-frame return-address pops (heavy-trace.md known-limitation). | r=1 w=1 | 1e59 |
 | 0x4300-0x4301 | `stack_save_buildctr` | Dual-use scratch: saved SP during magic-window stack-fills (0x1A4E/0x1E59/0x1E78) and a BCD row counter during maze build (0x19EC). | r=24 w=28 | 1a4e 1e59 1e78 |
-| 0x433e-0x4340 | `score_ptr_p1` | Player-1 score pointer/value base (saved/restored around reseed in 0x1685; selected by 0x2334). | r=53 w=1 | 1685 |
-| 0x4341-0x4343 | `score_ptr_p2` | Player-2 score base (selected when 0x4344==2). | (untouched) | (boot only) |
-| 0x4344 | `current_player` | Current player / player-count selector (==2 chooses P2 paths; copied from ROM config at game start). | r=42 w=1 | 1685 |
-| 0x4344-0x434f | `game_config_block` | 12-byte per-game config copied by 0x1685 from ROM 0x16CD: 0x434A bonus/score param, 0x434B robot count (read 9700x), 0x434C level/difficulty counter, 0x434D robot speed/type, 0x434E misc. | r=42 w=1 | 1685 |
+| 0x433e-0x4340 | `score_p1` **[gameplay-confirmed]** | **Player-1 score, 3-byte BCD VALUE** (0x433E thousands .. 0x4340 tens/units), low byte at 0x4340. NOT a pointer -- the prior "score_ptr_p1" label conflated the value with the pointer: `0x2334` is the score-pointer SELECTOR (returns HL=&score for the current player), and `0x2341` ADD_AND_DRAW_SCORE BCD-adds points here then redraws via PRINT_DIGITS (0x2a40, HL=0x433E). Observed in kill_robots: `000000 -> 000500` in 10 steps of +50 (= 10 robot kills @50 pts). | r=53 w=1 | 1685 2341 |
+| 0x4341-0x4343 | `score_p2` **[attract-inferred]** | Player-2 score (3-byte BCD; selected when 0x4344==2). By symmetry with 0x433E-0x4340; NOT exercised by the 1-player kill_robots run -- inferred, confirm with a 2-player credited trace. | (untouched) | (boot only) |
+| 0x4344 | `current_player` **[gameplay-confirmed]** | Current player / player-count selector (==2 chooses P2 paths; copied from ROM config at game start). Observed `0 -> 1` at 1P game start (kill_robots f1419). | r=42 w=1 | 1685 |
+| 0x4344-0x434f | `game_config_block` | 12-byte per-game config copied by 0x1685 from ROM 0x16CD at game start. Sub-fields below: 0x434C is **gameplay-confirmed**; the rest are **[attract-inferred]** (copied-but-unexercised in attract) -- the old "0x434C level/difficulty counter" guess was WRONG, so the sibling guesses (0x434A/B/D/E) are equally unverified and should be confirmed in credited play before being trusted: 0x434A bonus/score param [inferred], 0x434B robot count (read 9700x) [inferred -- plausible but unconfirmed], **0x434C `lives` [gameplay-confirmed]: lives remaining, init 5 from config, decrements per death (kill_robots: 5->4->3->2->1 across 4 deaths) -- was mislabelled "level/difficulty counter"**, 0x434D robot speed/type [inferred], 0x434E misc [inferred]. | r=42 w=1 | 1685 |
 | 0x435c-0x435d | `lcg_seed` | ENTROPY: LCG seed for RANDOM (0x2678); reseeded at game start (0x1685) and per maze (0x2540) from the entropy phase counter. | r=117 w=118 | 2540 25eb 2678 |
 | 0x435e-0x436c | `robot_placement_buf` | 15-byte robot-placement / maze-cell working buffer (copied from ROM 0x268C by 0x2540; read by 0x1CE7 coord-to-cell and the blitter). | r=688 w=3 | 2540 25eb |
 | 0x436d | `score_draw_flag` | Score-redraw carry/dirty flag (0x2314/0x2341). | r=0 w=34 | 1e78 2314 2341 |

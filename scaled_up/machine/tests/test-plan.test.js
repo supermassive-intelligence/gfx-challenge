@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROM_FILES } from '../src/roms.js';
-import { generateTestPlan, replayFromRecord, buildRomImage } from '../tools/generate_test_plan.js';
+import { generateTestPlan, replayFromRecord, buildRomImage, explainRecord } from '../tools/generate_test_plan.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,6 +58,34 @@ test('every emitted record self-validates (replay reproduces regs_out + writes)'
         `write[${i}] mismatch for ${rec.routine} ${rec.entry_pc} path ${rec.path_id}: got [${wa},${w.val},${w.type}] want [${a},${v},${t}]`);
     }
   }
+});
+
+// --explain: explainRecord reproduces the EXACT executed instruction trace (the pcPath
+// that generation discards down to path_id) with data reads/writes attributed per insn.
+// RANDOM (0x2678) is the canonical straight-line reference: a single 14-instruction path.
+test('explainRecord yields the RANDOM instruction trace with reads/writes attributed', { skip }, () => {
+  const rom = buildRomImage(romRead);
+  // RANDOM first fires ~frame 950, so widen the window enough to capture it.
+  const { records } = generateTestPlan({ romRead, scriptText: fs.readFileSync(SCRIPT, 'utf8'), maxFrames: 1100 });
+  const rnd = records.find((r) => r.entry_pc === '0x2678');
+  assert.ok(rnd, 'no RANDOM (0x2678) record in the window');
+  const res = explainRecord(rom, rnd);
+  assert.ok(res.ok && res.returned, 'explainRecord did not return cleanly');
+  const mnem = res.steps.map((s) => s.m);
+  assert.deepStrictEqual(mnem, [
+    'push hl', 'ld hl,($435c)', 'ld d,h', 'ld e,l',
+    'add hl,hl', 'add hl,de', 'add hl,hl', 'add hl,de',
+    'ld de,$3153', 'add hl,de', 'ld ($435c),hl', 'ld a,h', 'pop hl', 'ret',
+  ], 'RANDOM instruction sequence mismatch');
+  // Read/write ATTRIBUTION (the point of the tool): code/operand fetches are not logged;
+  // only data accesses are, on the instruction that caused them.
+  const ld = res.steps[1];                              // ld hl,($435c)
+  assert.deepStrictEqual(ld.reads.map((r) => r[0]), [0x435c, 0x435d], 'seed read not attributed to ld hl,(nn)');
+  assert.strictEqual(ld.writes.length, 0, 'ld hl,(nn) must not write');
+  assert.strictEqual(res.steps[0].writes.length, 2, 'push hl writes two bytes (the saved HL)');
+  const store = res.steps.find((s) => s.m === 'ld ($435c),hl');
+  assert.deepStrictEqual(store.writes.map((w) => w[0]), [0x435c, 0x435d], 'seed store not attributed');
+  assert.strictEqual(res.steps[res.steps.length - 1].reads.length, 2, 'ret reads the 2-byte return address');
 });
 
 // Determinism: same window -> same record set (path_ids + counts stable).

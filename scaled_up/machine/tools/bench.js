@@ -27,6 +27,18 @@ import { assembleRoms, ROM_FILES } from '../src/roms.js';   // pure ROM byte ass
 
 const CMP_KEYS = ['a','f','b','c','d','e','h','l','ix','iy',
                   'a_p','f_p','b_p','c_p','d_p','e_p','h_p','l_p'];  // excludes sp, r
+// X/Y-FLAG TOLERANCE (extends the T2.3 core-gate tolerance to the port bench). The
+// undocumented X(bit3)/Y(bit5) flags come from the internal WZ register on hardware;
+// the vendored live core (z80_core.js) does NOT model WZ -- it uses the n-based BIT
+// rule -- so for some BIT-at-ret routines the MAME-captured record's X/Y differ from
+// what the live machine produces. T2.3 PROVED (decode-oracle scan) that Berzerk never
+// branches on X/Y, so they are not behaviorally load-bearing; comparing the JS port to
+// MAME's X/Y would hold it to a standard the un-hooked machine itself cannot meet. We
+// therefore MASK X(bit3)/Y(bit5) when comparing the F and F' bytes -- every documented
+// flag (S/Z/H/P/N/C), all registers, and all memory writes are still compared exactly,
+// so a genuine regression still fails. See decisions.md 2026-06-19 (T2.3 extension).
+const F_KEYS = new Set(['f', 'f_p']);
+const XY_MASK = ~((1 << 3) | (1 << 5)) & 0xff;   // clear bit5 (Y) and bit3 (X)
 function composeF(fl){return ((fl.S&1)<<7)|((fl.Z&1)<<6)|((fl.Y&1)<<5)|((fl.H&1)<<4)|((fl.X&1)<<3)|((fl.P&1)<<2)|((fl.N&1)<<1)|(fl.C&1);}
 function decomposeF(f){return {S:(f>>7)&1,Z:(f>>6)&1,Y:(f>>5)&1,H:(f>>4)&1,X:(f>>3)&1,P:(f>>2)&1,N:(f>>1)&1,C:f&1};}
 
@@ -91,6 +103,10 @@ function buildCtx(rec, romImage) {
     },
     _writes: writes, _ioWrites: ioWrites,
   };
+  // retAddr = the return address the CALL pushed (the word at entry sp). Inline-param
+  // ports (0x3657/0x297b) read their constant data bytes that follow the call site at
+  // this address; mirrors the live hook's ctx.retAddr so a port is caller-agnostic.
+  ctx.retAddr = (mem[ri.sp & 0xffff] | (mem[(ri.sp + 1) & 0xffff] << 8)) & 0xffff;
   return ctx;
 }
 
@@ -106,8 +122,11 @@ function regsOutOf(ctx) {
 // is not recorded -- heavy-trace.md note #4 -- so compare the two streams separately).
 function diffCase(rec, ctx) {
   const got = regsOutOf(ctx);
-  for (const k of CMP_KEYS) if ((got[k]|0) !== (rec.regs_out[k]|0))
-    return { ok:false, why:`regs_out.${k} got 0x${(got[k]|0).toString(16)} want 0x${(rec.regs_out[k]|0).toString(16)}` };
+  for (const k of CMP_KEYS) {
+    const mask = F_KEYS.has(k) ? XY_MASK : 0xffffff;   // mask undocumented X/Y on F/F'
+    if (((got[k]|0) & mask) !== ((rec.regs_out[k]|0) & mask))
+      return { ok:false, why:`regs_out.${k} got 0x${(got[k]|0).toString(16)} want 0x${(rec.regs_out[k]|0).toString(16)}` };
+  }
   const stack = stackAddrs(rec);
   const wantAll = expectedWrites(rec, stack);
   const wantMem = wantAll.filter(w => w[2] === 'mem');

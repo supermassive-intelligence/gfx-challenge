@@ -12,3 +12,6 @@ traces/*.jsonl
 
 # Speech/sound capture logs (large; regenerable via tools/mame/speechlog.lua) -- T2.8b
 speechlog.txt
+
+# Transparency tool un-hooked hash cache (regenerated on demand)
+.cache/

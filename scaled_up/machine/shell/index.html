@@ -13,6 +13,10 @@
     .row { margin: 8px 0; }
     #rec-btn { padding: 2px 10px; cursor: pointer; }
     #rec-btn.recording { background: #c00; color: #fff; border-color: #f44; }
+    #hooks-badge { margin: 8px 0; padding: 4px 8px; border-radius: 3px; font-weight: bold;
+      display: inline-block; }
+    #hooks-badge.on  { background: #063; color: #cfc; border: 1px solid #0a6; }
+    #hooks-badge.off { background: #630; color: #fcc; border: 1px solid #a60; }
   </style>
 </head>
 <body>
@@ -23,6 +27,8 @@
     </label>
   </div>
   <div id="status">Select the Berzerk ROM files to boot. (rom0 + rom1-5; voice ROMs optional/ignored.)</div>
+  <div id="hooks-badge" class="off">PORT HOOKS: (booting...)</div>
+  <div id="play-readout" style="margin:8px 0; font-family:monospace;">PLAY STATE: (booting...)</div>
   <canvas id="screen" width="256" height="224"></canvas>
   <div class="row">
     Controls: <kbd>&larr;&uarr;&darr;&rarr;</kbd> move &nbsp; <kbd>Space</kbd>/<kbd>Z</kbd> fire &nbsp;

@@ -90,6 +90,22 @@ export class Scheduler {
   // method exists to record the hardware note, not to be called. [Section 5.4]
   ackIrq() { this.irqPending = false; }
 
+  // True iff a frame interrupt event (NMI/IRQ trigger) is scheduled STRICTLY
+  // inside the next `cycles` of this frame. The T9.1 port hook uses this to
+  // decline fast-pathing a displaced routine whose cycle window an interrupt
+  // would split: when an interrupt lands mid-routine, atomic cycle-charging
+  // would service it at a different beam position than the real (instruction-
+  // by-instruction) routine, perturbing the V256 entropy phase. Conservative --
+  // also true if the window would cross the frame boundary -- and port-agnostic.
+  eventWithin(cycles) {
+    const end = this.frameCycle + cycles;
+    if (end >= CYCLES_PER_FRAME) return true;            // spans frame boundary
+    for (const ev of FRAME_EVENTS) {
+      if (ev.cycle > this.frameCycle && ev.cycle < end) return true;
+    }
+    return false;
+  }
+
   // --- Readable position [Section 5.1/5.2] ---
   vpos() { return Math.floor(this.frameCycle / CYCLES_PER_SCANLINE) % VTOTAL; }
   v256() { return vposToVsync(this.vpos()).v256; }

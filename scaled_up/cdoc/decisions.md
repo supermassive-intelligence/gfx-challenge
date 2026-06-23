@@ -894,3 +894,875 @@ Format: date — decision — rationale — decided by.
   from the add; Y,X from the result high byte) -> passes 4/4 committed cases; a
   deliberately-broken port exits non-zero (DoD). 396 other cases correctly skipped.
 - Committed nothing. T8.1 ends at awaiting-human.
+
+## Trace architecture — two tiers + seeding (2026-06-18, clarification)
+
+- 2026-06-18 — TWO-TIER TRACE MODEL (Sudnya, clarifying the intended design;
+  interactive capture not yet built). Tracing is two stages:
+  * LIGHTWEIGHT trace = an interactive, user-driven capture: the input/event log
+    only, NO per-PC detail, cheap enough to record during live play. This is the
+    tier that reaches genuine gameplay (a human credits a coin and plays), and it
+    is the DURABLE, hard-to-regenerate artifact. The hand-authored input scripts
+    in traces/scripts/ are lightweight traces by another name (same pipeline slot).
+  * HEAVYWEIGHT trace = produced by deterministically RE-EMULATING a lightweight
+    trace through the instrumented machine to extract per-invocation detail. It is
+    a REGENERABLE cache, not a precious recording.
+- 2026-06-18 — PER-PC COMPONENT FIDELITY COMES FROM SEEDED RE-EMULATION, NOT
+  LOGGING. Because the heavyweight pass re-emulates a live, fully-stateful machine,
+  it reproduces every emulated-component state change PC-by-PC by executing — IF
+  the lightweight trace seeds a bit-identical run and the emulator is deterministic
+  and faithful. So the real obligation is on the SEED:
+  * The lightweight trace MUST seed a bit-identical re-emulation. From cold reset
+    that is just (cold reset + input/event sequence). If interactive capture ever
+    starts from a non-cold state (resume point, or battery-backed NVRAM contents),
+    the lightweight trace MUST additionally snapshot the initial state the run
+    depends on — INCLUDING component latch state at the start point — or the
+    re-emulation diverges and the PC-by-PC component changes won't match. This is
+    the actual "to be safe" content of the lightweight trace.
+  * Corollary: the heavyweight trace being "regenerable" is an argument against
+    panicking over data loss, NOT an argument for recording less. Any field
+    (incl. component latches) is re-extractable from the lightweight trace by
+    re-running heavyweight capture, WITHOUT re-doing the interactive session.
+- 2026-06-18 — RECORD COMPONENT TRANSITIONS ONLY FOR CONSUMERS THAT CANNOT
+  RE-EMULATE. Two such consumers exist: (1) the Phase-8 bench is intentionally
+  HERMETIC (no full machine), so to test a routine whose result depends on a
+  stateful component (the magic-RAM 74181 ALU: control register + shift latch;
+  collision flop is read-observable so already captured) it needs EITHER the T2.5
+  ALU model present OR the captured component transitions handed in as ground
+  truth; (2) CROSS-MACHINE comparison can't reproduce MAME's run from our
+  lightweight trace, so localizing a JS<->MAME divergence at component granularity
+  requires logging on both sides. Everywhere else, seed + re-emulation gives the
+  fidelity with nothing stored.
+- 2026-06-18 — DRAW-CORRECTNESS GAP IS A HERMETIC-CONSUMER GAP, NOT A CAPTURE GAP.
+  Heavyweight capture already reproduces magic-RAM state (full machine). The hole
+  is that the bench has no ALU model and the trace records the pre-ALU CPU byte
+  (heavy-trace.md note #3), so a ported draw routine could pass its test yet render
+  wrong pixels (and golden frames don't reach gameplay draws past frame 258). FIX:
+  give the hermetic bench either the T2.5 ALU model or the recorded component
+  transitions. FIRST verify whether generate_test_plan.js/bench.js already wire in
+  the ALU model. NOTE: option (b) — recording component transitions — touches the
+  FROZEN cdoc/schemas/heavy-trace.md schema, so it needs its own decisions entry +
+  sign-off and a regeneration of heavyweight traces + test plans from the existing
+  lightweight traces (cheap, non-destructive). — Sudnya (via Cowork review).
+
+- 2026-06-18 — CORRECTION to the "DRAW-CORRECTNESS GAP" entry above (verified
+  against the actual code + test-plan records). It is NOT a real gap. bench.js
+  uses a flat mock and compares pre-ALU CPU writes — but a routine's contract is
+  its BUS OUTPUT, not pixels. Evidence: PRINT_CHAR (0x29db) writes its own magic
+  control 0x4B=0x94 (captured + compared); DRAW_SPRITE (0x2817) writes magic bytes
+  with NO control writes (it inherits the caller's control). A draw routine's byte
+  choices are independent of the control register / shift latch (those govern only
+  the downstream 74181 transform), so the bench fully verifies the routine from
+  (regs+reads)->(writes). Pixel correctness = per-routine bus correctness (Gate 2)
+  + caller sets the control (tested when that routine is verified) + the shared
+  74181 ALU (validated by Gate 1's boot self-test, inside frames 0-258) + preserved
+  call order (Phase 9); post-ALU read-backs are seeded from the read-set, and
+  DRAW_SPRITE's self-validation into the plan confirms it doesn't depend on
+  re-reading transformed VRAM. CONSEQUENCE: the bench needs NO ALU model and NO
+  component-transition recording for draw correctness; the heavy-trace schema does
+  NOT need to change for this. The only genuine residual is the absence of an
+  END-TO-END gameplay-pixel gate (golden frames stop at 258) — i.e. the existing
+  re-timed-scripts/gameplay-coverage item, not an ALU issue. Component-transition
+  logging remains optional and useful only for cross-machine (MAME) divergence
+  localization. — Sudnya (via Cowork review; code-verified).
+
+## 2026-06-18 — T9.1 port hook harness (cycle accounting + two divergence fixes)
+
+The Phase-9 dispatcher (`machine/src/port-hook.js`) runs a registered JS port in
+place of the Z80 routine at a CALL target, sharing the live machine's memory/IO,
+returning as if `ret`. Decisions a future session should not re-litigate:
+
+1. **Charge the displaced routine's own cycle cost.** A native JS port runs in 0
+   Z80 cycles; the dispatcher returns the routine's heavy-trace `cycle_count`
+   (entry..ret inclusive; RANDOM = 140, matching every RANDOM test-plan `cycles`)
+   to the scheduler exactly as `cpu.step()` would. This preserves interrupt cadence
+   and the timing-locked V256/entropy phase (T5.1/T5.2). Charging 0 (or a wrong
+   count) shifts interrupts and diverges. Per-routine cycle costs live in
+   `ports/index.js` `PORT_META`.
+
+2. **Interrupt-granularity decline.** Charging the cost ATOMICALLY (one step)
+   defers an interrupt that, un-hooked, would be serviced MID-routine to AFTER it
+   (~1 scanline later), shifting the ISR's port-0x4E V256 read and perturbing the
+   0x089F counter → LCG seed 0x435C → object placement. Measured divergence before
+   the fix: attract frame 2090. FIX: a port-agnostic `scheduler.eventWithin(cycles)`
+   query; the hook fast-paths ONLY when no interrupt event splits the window,
+   otherwise returns null so the core runs the real routine (byte-identical to
+   un-hooked). When nothing splits the window, atomic charge == the sub-steps.
+
+3. **Stack overlaps VRAM — the hook must replay entry pushes.** Berzerk's stack is
+   inside the 0x4000-0x5FFF screen RAM (observed sp 0x42f2). RANDOM's `push hl`
+   therefore writes HL onto VRAM (0x42f0/0x42f1, visible row 23) — transient stack
+   noise the real machine and MAME both produce (the T3.4 visible golden matched it
+   through frame 258). A register-only port omits the push, so the hooked machine
+   diverged from un-hooked at exactly those bytes on frames 2090 and 2149 (each
+   reconverging the next frame as the next draw overwrote them). FIX: each port
+   declares its entry pushes in `PORT_META.pushes`; the hook replays them into live
+   memory (pop/ret only read, so the push bytes are the sole observable stack-frame
+   memory effect; `push X..pop X;ret` leaves net sp = entry_sp+2). This is a new
+   porting hazard for T9.2 — see the T9.1 hazard checklist.
+
+Evidence: full attract (3085 frames, full VRAM) hooked == un-hooked byte-for-byte;
+RANDOM bench 4/4; visible-rows 0-258 identical with hook active and RANDOM never
+reached during boot (hook inert); `npm test` 96/96. NOTE: no committed MAME goldens
+exist (`tools/golden.js` reports no-golden for all scenarios), so the boot
+regression is the visible-rows 0-258 self-consistency, not a MAME match. — pending
+Sudnya sign-off (T9.1 is awaiting-human).
+
+## Phase 10 — two build targets (2026-06-18, decision)
+
+- 2026-06-18 — PHASE 10 SHIPS TWO SEPARATE BUILD TARGETS from one codebase
+  (Sudnya), NOT a single artifact that loses emulation, and NOT a one-target
+  mode switch:
+  * NATIVE (pure-JS) target — the Z80 interpreter is NOT in the run path; the rAF
+    loop + JS interrupt cadence (T2.6 schedule) drive the ported routines. The
+    shippable Berzerk.
+  * EMULATOR target — the Z80 core in the loop (the machine as of Phase 9),
+    retained as a FIRST-CLASS build.
+  Both build from the shared machine code (memory/video/scheduler/ported
+  routines); the only difference is whether the Z80 interpreter is wired into the
+  loop. RATIONALE: the emulator target is load-bearing, not a debug afterthought —
+  it is (a) the continuing ORACLE the native port is verified against (native ≡
+  emulator ≡ MAME), (b) the engine that REGENERATES heavyweight traces / test
+  plans from lightweight traces, and (c) the way to DEBUG the native port (run the
+  same input on both targets and diff). "Remove the core" (older plan wording)
+  means the NATIVE target omits it from its run path — it never means the project
+  loses emulation. The flush test applies to the NATIVE target only (no
+  interpreter fallback → any unported routine errors loudly = the 100%-coverage
+  proof). T10.1 updated accordingly. — Sudnya.
+
+## Phase 9 — T9.2 porting mechanics (2026-06-18)
+
+- 2026-06-18 — T9.2 PORT FLAG MODEL: ports compute the Z80 F byte via a shared
+  `machine/ports/z80flags.js` (sub/cp/and/or/xor/add/inc/dec/addHL16). The
+  undocumented X(bit3)/Y(bit5) flags ARE load-bearing (records captured from a real
+  Z80 via MAME) and CP takes X/Y from the OPERAND, not the result. The bench
+  compares F exactly, so the helpers are validated against captured records, not
+  asserted by hand.
+- 2026-06-18 — T9.2 PATH-DEPENDENT CYCLE COST: T9.1 charged a single fixed
+  PORT_META.cycles (correct only for straight-line routines like RANDOM). Branching
+  routines (ret cc, jr cc) cost different amounts per path, and the live hook must
+  charge the ACTUAL taken-path cost or the interrupt cadence (V256/entropy phase,
+  T5.1/T5.2) shifts. RESOLUTION: a port may set `ctx.cycles` to its taken-path cost;
+  `PORT_META.maxCycles` (>= every path) is used for the eventWithin decline gate.
+  Since actual <= gate and we only fast-path when no interrupt lands within the
+  gate window, the fast-path is provably interrupt-free, so atomic charge of the
+  actual cost stays byte-transparent. Confirmed: all 5 scripts hooked==un-hooked.
+- 2026-06-18 — T9.2 VERIFICATION (golden.js is a no-op until MAME goldens exist):
+  per-routine gate = (a) bench behavioral exactness on every captured record, (b)
+  the hook is dispatched live and non-vacuous (counted), (c) hooked==un-hooked
+  full-frame hashes byte-identical across all 5 scripts. A coin-start-first-maze
+  hooked==un-hooked case was added to port-hook.test.js because the gameplay ports
+  (sound/velocity/credits) are never reached in attract.
+- 2026-06-18 — T9.2 BOTTOM-UP COMPOSITION: a routine that falls into / would CALL an
+  already-ported leaf is ported by invoking that leaf's port fn (0x2b39 ->
+  SET_VELOCITY). This is the intended leaf-first order; a routine stays unported
+  until its effectful callees are ported.
+- 2026-06-18 — T9.2 INNER-CALL VRAM RESIDUE (batch 2): a port that elides a
+  routine's inner `call X` must still replay the 2-byte residue that the real
+  `call` writes onto the VRAM-overlapping stack (the pushed return address). The
+  matching `ret` pops sp, but the two bytes it wrote persist on screen as transient
+  noise the real machine/MAME produce. SYMPTOM: 0x1997's fast-path diverged from
+  un-hooked at coin-start frame 584 (the 2-visible-byte stack-in-VRAM signature),
+  even though its registers/flags/cycles matched the bench exactly and always-decline
+  was transparent -- isolating the cause to the elided inner `call $18E0` (pushes
+  0x199A). RESOLUTION: PORT_META.pushes now accepts a NUMBER (a literal residue =
+  the last inner call's return address) alongside register names; the dispatcher
+  writes it descending from entry sp like an entry push (residue only -- it does not
+  change the ret's sp math). 0x1997 -> pushes:[0x199a]; 0x157e (inner `call $1597`,
+  residue 0x1593) had passed transparency WITHOUT it by luck (the bytes fell outside
+  the rendered window) and is now declared so it matches the real machine
+  deterministically rather than coincidentally. General rule: any ported routine that
+  makes an inner CALL must declare that call's return-address residue.
+- 2026-06-18 — T9.2 NON-VACUOUS-DISPATCH IS A REAL GATE: 0x2c1f
+  (SAY_GOT_THE_HUMANOID) is bench-exact (1/1) and stays hooked==un-hooked, but it
+  fires only on killing the humanoid/Otto, which none of the 5 scenario scripts
+  reach -> 0 live dispatches. It is registered (correct + transparent) but explicitly
+  NOT counted as meeting the full per-routine bar (its live path is unexercised). It
+  must be re-confirmed when a script reaches that game event. Recorded so a future
+  session does not mistake "transparent" (vacuously true when never called) for
+  "verified live".
+- 2026-06-18 — T9.2 SHARED-BODY ROUTINES (batch 3): RTOAX (0x29a1) is literally
+  `ld b,$90` followed by a fall-through into CALCULATE_MAGIC_IMAGE_RAM_ADDRESS
+  (0x29a3) -- identical body, only B differs on entry. Ported as ONE implementation
+  (ports/magic_image_addr.js `body`): the 0x29a1 export sets b=0x90, runs the shared
+  body, and charges +7 cycles for the extra `ld b`. Both are leaves (no calls/pushes),
+  both dispatch heavily live (29a3=7546, 29a1=5236 over the 5 scripts), both bench-exact.
+  New z80flags helpers introduced and validated by the bench: srl8, rr8 (rotate-right-
+  through-carry), sbcHL16 (16-bit subtract-with-borrow, all flags incl. undoc Y/X).
+- 2026-06-18 — T9.2 INLINE-PARAMETER ROUTINES NOT HOOKABLE YET (batch 3): COLOUR_FILL
+  (0x3657) and PRINT_STRING_297B (0x297b) begin with `pop hl` to fetch the return
+  address, read data bytes that sit INLINE after the `call`, advance hl past them, and
+  `ret` to that advanced address. The T9.1 hook's RET model returns to the bytes AT
+  entrySp -- i.e. straight into the inline data, which it would then execute as code.
+  These cannot be hooked without a per-routine "return address += N inline bytes"
+  adjustment to the dispatcher. DECISION: leave them unported and bucketed as an
+  INLINE-PARAM hazard until the hook grows that adjustment; do NOT force them through
+  the current model. (Distinct from the stack/coroutine hazards: the divergence here
+  is the return TARGET, not residue.)
+- 2026-06-18 — T9.2 BENCH-UNEXERCISED BRANCH (batch 3): the magic-image routines have
+  a FLIP/cocktail path (taken when 0x4379 != 0) that none of the captured records
+  exercise (all have 0x4379 == 0). It is implemented from the disassembly but is NOT
+  bench-covered; only the live hooked==un-hooked regression would catch a bug there,
+  and only if a script flips the screen. Flagged in the port file so it is not mistaken
+  for bench-verified.
+- 2026-06-18 — T9.2 PORTABILITY HAZARD: `bit n,(hl)` UNDOCUMENTED FLAGS ARE WZ-DRIVEN
+  (batch 4, reusable triage rule). A routine that does `bit n,(hl)` immediately
+  followed by a return (`ret z`/`ret nz`) exposes the undocumented X(bit3)/Y(bit5)
+  flags of that `bit` instruction in its return F. Empirically (0x3719 record #0:
+  hl=0x0000 so (hl)=ROM[0]=0x00, yet f_out Y=1) these bits come from the Z80's
+  internal WZ/memptr register, NOT from the data byte and NOT from the address --
+  the port abstraction models neither, so the return F is not reproducible. RULE:
+  routines that `ret` directly after `bit n,(hl)` are NOT portable under the current
+  ctx (no WZ). This defers 0x3719 UNCOLOUR_MAN (early `bit 4,(hl); ret z`) and 0x27a9
+  (early `bit 2,(hl); ret z`). NOTE the contrast: `bit n,(iy+d)` takes X/Y from the
+  HIGH BYTE of the computed (iy+d) address, which IS known, so it is reproducible;
+  and a `bit n,(hl)` that is purely a mid-routine branch (never the last flag op
+  before a ret) is fine because its F is never observed. — found via Claude, recorded
+  for the next session's triage.
+- 2026-06-18 — T9.2 batch 4: ported WALK_OBJECT_TIMERS (0x27f5,
+  ports/walk_object_timers.js) -> 18/47. Circular object-list walk (head 0x0872):
+  per node, tick the bit1 countdown (`dec (P+1)`) and on expiry flip state bits
+  (`res 1`/`set 0`); follow the back-link at [P-2,P-1] until the walk wraps to the
+  head. Portable because every RETURN path exits via `or l` (empty list) or `cp e`
+  (loop done) -- both fully-defined ALU flags; the loop's `bit 1,(hl)` only drives a
+  branch and is never the last flag op (see WZ hazard above). No inner call/push, so
+  no VRAM stack residue. Cost is list-length dependent: the port accumulates exact
+  Z80 T-states into ctx.cycles (verified: the 127-cycle short path reconstructs as
+  prologue 37 + one bit1-clear node 90). PORT_META maxCycles=1242 = observed worst
+  case over the 5 scripts; since the test-plan records are generated from those same
+  5 scripts the live regression replays, actual cycles there are bounded by 1242, so
+  the decline gate (which only ever errs toward MORE declines, never divergence) is
+  safe. Verified: bench 35/35 (8 distinct cases), all 5 scripts hooked==un-hooked
+  byte-identical, 3878 live dispatches. The empty-list early-ret path (head==0) is
+  never taken by the records -- implemented from disassembly, bench-unexercised.
+- 2026-06-18 — T9.2 HOOK FIX: PUSH RESIDUE CAPTURED FROM THE OUTPUT BANK (batch 5).
+  The T9.1 dispatcher replays a routine's entry pushes onto the VRAM-overlapping stack
+  (PORT_META.pushes). It originally captured the pushed register values from the ENTRY
+  bank (before the port ran). That is only coincidentally correct: for a BALANCED
+  `push X ... pop X` frame the residue byte left in VRAM equals X at PUSH time, and the
+  matching `pop X` restores exactly that value into X, so residue == X_OUT. Entry-bank
+  capture (X_in) matches only when X_out == X_in -- true for every routine ported so
+  far because they push registers they do not modify (RANDOM push hl; sound push af
+  first; the literal-number residues are bank-independent). PRINT_CHAR breaks the
+  coincidence: it `push af` AFTER an ADD HL chain has modified F, so the residue F-byte
+  is f_out, not f_in. CHANGE (src/port-hook.js): capture pushVals AFTER applyCtx, from
+  the OUTPUT bank. Proven equivalent for all prior ports (full npm test 97/97 and all
+  5 scripts hooked==un-hooked still byte-identical) and necessary for PRINT_CHAR.
+  Measured before the fix: coin-start diverged at frame 582 (f_in 0x2C vs f_out 0x34
+  at the af residue byte). entrySp is still captured before the port; only the register
+  VALUES are read post-write-back.
+- 2026-06-18 — T9.2 batch 5: ported PRINT_CHAR (0x29db, ports/print_char.js) -> 19/47.
+  A TRUE LEAF (no CALL): computes a ROM font address ($2F1E + offset from BC), then
+  blits 9 rows (one masked byte + a 0x00 spacer per row, `out ($4b),a` per row). Ported
+  by faithful instruction-by-instruction transcription (NOT "by intent") because the
+  return flags and the SHADOW bank are load-bearing and subtle: f_out is the ADD HL
+  chain result saved by `push af` (S/Z/P preserved from entry, H/N/C/Y/X from the final
+  `add hl,bc`); the routine carries the 9-row counter in the SHADOW AF via `ex af,af'`,
+  so a_p_out = the last masked glyph byte and f_p_out = the last `add hl,bc` flags --
+  both compared by the bench. Simulating the real opcodes with the z80flags helpers
+  makes these exact rather than hand-derived. The FLIP/cocktail path ($4379 != 0) is
+  implemented from the disassembly but BENCH-UNEXERCISED (all records have $4379 == 0).
+  Cost is path-dependent (fixed 9-row loop + sign branch + flip branch); ctx.cycles is
+  exact (positive-upright path reconstructs to the captured 1276), maxCycles=1302
+  (flip+negative worst case). Pushes hl/de/af -> VRAM residue (see hook fix above).
+  Verified: bench 10/10, npm test 97/97, all 5 scripts hooked==un-hooked byte-identical,
+  384 live dispatches. UNBLOCKS the text/score subtree: 0x2a40 (digit/string blit) now
+  has its only missing leaf, which in turn unblocks 0x18cd / 0x2314 / 0x197b / 0x2341.
+- 2026-06-18 — T9.2 batch 6: ported C_LOAD (0x1776, ports/c_load.js) -> 20/47. A TRUE
+  LEAF (no CALL): reads a 13-byte parameter block at $0878 and streams it to the Exidy
+  6840 PTM / sound-control ports $40-$47 via `out (c),r`. Ported by faithful
+  transcription. Three points made it safe rather than tricky: (1) `out (c),r` writes
+  the port held in C and Berzerk decodes only the low 8 bits -- the bench masks the
+  port to 0xFF and the captured io writes match (ports walk 0x41->0x40->...->0x46);
+  (2) `res`/`set n,r` on a register and `djnz` do NOT affect flags, so the only
+  ret-visible F comes from the second loop's `add a,$40` (with a=0xc0 -> 0x00, giving
+  f_out=0x41: Z=1,C=1) -- modeled with add8/and8/or8; (3) both djnz counts are
+  IMMEDIATES (3 then 4) and no branch depends on data, so the path is FIXED at 642
+  T-states (hand-summed instruction-by-instruction, matches the record `cycles`
+  exactly -- which also confirms the disassembly is complete). No push/call -> no
+  VRAM-stack residue (pushes:[]). All 5 captured records are the identical path
+  (acb5adb0). Verified: bench 5/5 (total 112/112), npm test 97/97, all 5 scripts
+  hooked==un-hooked byte-identical, 55540 live dispatches (one of the most-called
+  ports -- sound register loading). Candidate triage this batch: examined the two
+  other high-record TODOs and DEFERRED both for cause -- 0x15cb (22 records) ends with
+  `pop hl; ret`, a NON-LOCAL return that drops two stack levels on its success path
+  (returns to the grandparent), which the T9.1 hook's single-RET model cannot
+  reproduce; it ALSO opens with `bit 2,(ix+$00); ret z` needing a bit-indexed flag
+  helper. Both are infrastructure, not a port -- left for a hook extension. 0x2a40
+  (digit/string blit, the PRINT_CHAR unblock) was NOT picked: it has no test-plan
+  records of its own (reached only via callers), so it cannot meet the full bench bar
+  this batch -- it would need composition + caller-regression instead.
+- 2026-06-18 — T9.2 observation (not a decision): a fresh full-5-script dispatch probe
+  shows 0x2c1f SAY_GOT_THE_HUMANOID now fires ONCE in attract-only (the attract demo
+  kills a humanoid), not 0 as recorded in batches 2/5. The attract script was retimed
+  since then (frame-573 gap work). So 0x2c1f's live path is now exercised AND
+  transparent (attract-only stays byte-identical hooked==un-hooked). Upgrading its note
+  from "unexercised / 0 dispatches" to "1 live dispatch (attract-only)".
+- 2026-06-18 — T9.2 batch 7: ported 0x22f1 RESET_JOBS (machine/ports/reset_jobs_22f1.js),
+  bringing the count to 21/47. A clean leaf job/coroutine-teardown: `push iy; pop hl`
+  to grab IY, write IY into its own (iy-1)/(iy-2) frame slots, zero the job-list head
+  ($0870) and current-job pointer ($0876), `di`-bracketed clear of a 56-byte table at
+  $437B, then `ld a,($4379); or a; ei; ret`. Faithful transcription. THREE points worth
+  recording: (1) IFF is NOT modeled -- `di`...`ei` nets to no change and IFF is not a
+  compared register; the live hook charges the full displaced window (1612 T-states)
+  and DECLINES if an interrupt event would split it, so interrupt cadence is preserved
+  without a flip-flop. (2) `push iy` leaves IY as residue on the VRAM-overlapping stack
+  (matched-pop balanced); IY is unchanged across the routine so output-bank == input-bank
+  and PORT_META pushes:['iy'] replays it correctly. (3) The 1612-cycle cost is fixed
+  (single path; the only loop's djnz count is the immediate $38=56) and hand-summed
+  instruction-by-instruction matches the record `cycles` exactly -- the key gotcha was
+  `pop hl`=10 T-states (not 14), which reconciled an initial 1616 to the recorded 1612
+  (also a disassembly-completeness check). Verified: bench 1/1 (total 113/113), npm test
+  97/97, all 5 scripts hooked==un-hooked byte-identical, 3 live dispatches (attract-only
+  2 + player-death 1; a rarely-called init routine, but genuinely non-vacuous -- it
+  fast-paths live and stays transparent). Candidate triage this batch: 0x22f1 was the
+  ONLY remaining clean leaf with records -- the other low-record routines are blocked
+  (0x1666/0x26ab are interrupt-core / stack-swap with `ld sp,nn` + `jp (hl)`; 0x1e59/
+  0x1fd4/0x200e do `ld sp`/`jp (iy)` coroutine switches, not `ret`; 0x197b/0x2be4 call
+  not-yet-ported callees 0x1908/0x18cd / 0x2b6b).
+
+- 2026-06-19 — T9.2 standing-plan infra sprint (decisions ratified by Sudnya, executed
+  autonomously). FOUR settled calls, recorded so they are not re-litigated:
+  (1) HAZARD STRATEGY = B+A HYBRID. The 12 control-flow routines (9 coroutine/
+      stack-switch: 0x1666 0x1e22 0x1e59 0x1e6d 0x1e78 0x1fd4 0x200e 0x24f7 [+0x1c6e,
+      see correction below]; 1 interrupt core 0x26ab; 2 computed jump-table 0x1aed
+      0x1d22) PLUS the 2 WZ-hazard routines (0x27a9 0x3719) are LEFT ON THE Z80 CORE
+      permanently -- they are the scheduler/interrupt/dispatch SUBSTRATE, not leaf
+      logic, and the hook already declines them transparently. They are deferred to
+      the Phase-10 native re-architecture (T10.1) and run on the emulator target
+      meanwhile. We do NOT attempt to CALL-hook them and we do NOT build a `wz` hook
+      extension (it would require capturing WZ in the heavy trace -- disproportionate
+      for 2 routines). Strategy A is applied ONLY to the data-leaf hazards via two
+      small hook extensions: framesToDrop (non-local `pop hl; ret`) and returnPc/
+      retAddr (inline-parameter routines). This caps the hookable ceiling well below
+      a naive 35; see the corrected portable set below.
+  (2) TRANSPILER = NO-GO. With a small number of mechanically-similar leaves left to
+      port by hand and the bench (MAME records) as an exact per-routine oracle, a
+      decode-oracle->JS transpiler's correctness burden exceeds hand-porting. Not built.
+  (3) MAME GOLDENS = USER-SIDE, NON-BLOCKING. golden.js remains a no-op until Sudnya
+      generates+commits MAME golden hashes. The live transparency guard for T9.2 is
+      bench-exactness + hooked==un-hooked over the 5 scripts; that is sufficient to
+      gate each batch and does not block on goldens.
+  (4) HOOK EXTENSIONS ADDED (src/port-hook.js): ctx.framesToDrop=N drops N extra return
+      words before the final ret (non-local return to an ancestor N levels up:
+      pc=mem[entrySp+2N], sp=entrySp+2+2N); ctx.returnPc=ADDR resumes at a port-computed
+      absolute address (inline-param `jp (hl)` / ret-past-inline) with sp=entrySp+2; and
+      ctx.retAddr exposes the CALL return address so inline-param ports can fetch the
+      constant bytes that follow their call site. Unit-tested in port-hook.test.js
+      (framesToDrop non-local ret; returnPc+retAddr inline-param) and the bench ctx
+      mirrors retAddr (tools/bench.js) so such ports are caller-agnostic.
+
+- 2026-06-19 — T9.2 TRIAGE CORRECTIONS (found by reading the actual disassembly before
+  porting; the 2026-06-19 triage table over-classified three routines as portable
+  leaves). All three are reclassified to the hazard bucket (stay on the Z80 core):
+  * 0x287f SHOOT/SPAWN_ROBOT_SHOT -- NOT a leaf. Ends `pop hl; inc hl; inc hl; pop af;
+    pop bc; ld c,$10; jp (hl)` (a non-local COMPUTED return that pops three frames and
+    vectors via jp(hl)), and contains `call $1e6d` (ACTOR_YIELD, a blocked coroutine).
+    Neither the single-ret model nor framesToDrop/returnPc covers a 3-frame jp(hl) that
+    also nests a coroutine. The pre-existing machine/ports/shoot.js (partial, with a
+    hand-waved `g.f=0x42`) is NOT registered and should not be -- it cannot reproduce
+    either control-flow feature. Deferred to Phase 10.
+  * 0x1c6e SCORE_S_SAVE -- contains `halt` (0x1c72). The real routine blocks until the
+    next interrupt, so its end-to-interrupt timing is locked to the interrupt phase, NOT
+    to an instruction count. The live hook charges a FIXED displaced cycle cost, which
+    would desync interrupt cadence (the V256/entropy phase, T5.2). A halt's duration is
+    indeterminate for displacement; not transparently hookable. Deferred to Phase 10.
+  * 0x151a COLLISION_SENSE -- composes 0x1553 and 0x15a0, both of which have ZERO
+    test-plan records (reached only as nested callees). They cannot be bench-verified,
+    so 0x151a cannot meet the per-routine bar. Deferred until/unless those callees gain
+    coverage.
+  Net: the realistic hookable set this plan targets is 0x1ce7, 0x272d, 0x2be4 (no new
+  infra), 0x15cb (framesToDrop), the DAA score subtree (0x1908/0x197b/0x2341 with their
+  folded callees), and 0x3657/0x297b (returnPc/retAddr) -- materially fewer than the
+  "~33" estimate once SHOOT/1c6e/151a are removed. Honest ceiling reported per batch.
+
+- 2026-06-19 — T9.2 z80_core BIT undocumented-flag note (not load-bearing for ports,
+  but recorded so the masked validation is not mistaken for a gap): z80_core.js sets the
+  undocumented X/Y flags of every BIT n,* instruction by the BIT-NUMBER rule
+  (Y=(n==5 && bit set), X=(n==3 && bit set); z80_core.js ~L1762). That is an emulator
+  simplification, not the documented-hardware rule, under which BIT n,(ix+d) takes X/Y
+  from the HIGH BYTE of the address (ix+d) and BIT n,(hl) from WZ. ports/z80flags.js
+  bitIdx8 implements the hardware (address-high-byte) rule, so it disagrees with the core
+  only at addrHi values with bit 3/5 set. tools/validate_flags.js therefore masks X/Y for
+  bitIdx8/bitHL8 and cross-checks only the documented S/Z/H/P/N/C; the X/Y rule is
+  exercised against MAME records via the 0x15cb bench (where the real actor pointers have
+  no bit-3/5 in their high byte, so it reduces to X=Y=0 either way). bitHL8 zeroes X/Y by
+  construction and is only safe for MID-routine `bit n,(hl)` whose F is overwritten before
+  any ret (the WZ hazard for ret-exposed (hl) bits stays in the deferred bucket).
+
+- 2026-06-19 — T9.2 standing-plan execution (bitHL8 + extensions + cheapen-loop + ports):
+  * PORTED 0x1ce7 COORD_TO_MAZECELL (machine/ports/coord_to_mazecell.js), 23/47. A clean
+    leaf (ends in single ret, no push/call -> no VRAM residue) mapping an (H,L) coord to a
+    maze-cell byte via a 3-band L lookup + up-to-5-step H loop into table 0x435e. Ported by
+    FAITHFUL TRANSCRIPTION because its return flags are exit-path dependent (jr-c exit
+    leaves `cp` flags; djnz-expiry exit leaves `inc e` flags restored through `ex af,af'`)
+    and it uses the SHADOW AF bank as the running-threshold scratch (a_p/f_p are the last
+    `add a,$30`, not the entry shadow). Verified: bench 32/32, live 4/4 transparent
+    (dispatched 47312/8173/17742/47312; coin-start does not reach it), npm test 99/99.
+  * MAJOR FINDING -- BENCH ORACLE (MAME) vs LIVE CORE (z80_core.js) DISAGREE ON BIT
+    UNDOCUMENTED X/Y FLAGS, which caps the portable set. 0x15cb BOLT_VS_ACTOR opens with
+    `bit 2,(ix+$00); ret z`. On that early-exit path the captured MAME record has X/Y=1,1
+    (f_out=0x7c) but z80_core.js produces X/Y=0,0 -- z80_core implements the n-based BIT
+    rule (X/Y keyed off the bit number; n=2 -> 0,0; ~L1762) and so do MAME-independent
+    ports. CONSEQUENCE: a port of any routine that RETURNS directly after a `bit n,*` can
+    be either bench-exact (match MAME records) OR live-transparent (match the un-hooked
+    z80_core machine) but NOT BOTH, because the un-hooked machine itself does not produce
+    the MAME flags. Proven empirically: the 0x15cb port is byte-identical hooked==un-hooked
+    on all 4 dispatching scripts (attract 106 / free-play 23 / maze-transition 23 /
+    player-death 99) AND passes 14/22 bench records; the only 8 failures are this one
+    bit-2 ret-z path's X/Y. Since the T9.2 DOD requires a GREEN bench, 0x15cb is left
+    UNREGISTERED (deferred) -- the file machine/ports/bolt_vs_actor_15cb.js is retained with
+    a full deferral header. This is the same class as 0x3719/0x27a9 (already deferred). It
+    also means the framesToDrop extension's only intended target is blocked by its OPENER
+    (not its non-local return); the extension itself is correct + unit-tested and stays for
+    Phase 10 / any future clean non-local-ret routine.
+    DECISION NEEDED FROM SUDNYA: for routines where MAME and z80_core diverge ONLY on BIT
+    undocumented X/Y at a ret, should the bar be (a) live-transparency (accept; the JS
+    machine reproduces ITSELF -- which is the actual inversion goal), or (b) MAME-bench-
+    exactness (defer, as done now)? Option (a) would immediately register 0x15cb (live-
+    transparent today) and likely reopen 0x3719/0x27a9; option (b) keeps them deferred.
+  * INFRA: added bitHL8 (z80flags.js, WZ-less mid-routine bit helper, X/Y=0, validated
+    masked vs z80_core: 3488/0); framesToDrop + returnPc/retAddr hook extensions
+    (port-hook.js, unit-tested) + retAddr mirrored in the bench ctx; transpiler ruled
+    NO-GO; hazard strategy B+A ratified (see prior entry). Added tools/transparency.js:
+    caches un-hooked frame-hashes per script (invalidated by script/src mtime), scopes the
+    hooked==un-hooked run to only the scripts that dispatch a target PC, and localizes a
+    divergence (first bad frame + dispatching ports around it + differing VRAM/color bytes).
+
+- 2026-06-19 — T2.3 X/Y-FLAG TOLERANCE EXTENDED TO THE PORT BENCH (Sudnya's call). The
+  port bench (tools/bench.js) now MASKS the undocumented X(bit3)/Y(bit5) bits when it
+  compares the F and F' bytes, exactly as the T2.3 core-gate already tolerates them for
+  BIT/SCF/CCF/block-ops. Rationale (Sudnya): the bench's effective reference is the JS
+  core, not MAME -- holding a port to MAME's WZ-derived X/Y would demand behaviour the
+  un-hooked z80_core itself does not produce (z80_core does not model WZ; it uses the
+  n-based BIT rule). T2.3 already PROVED via the decode oracle that Berzerk never branches
+  on X/Y, so they are not behaviourally load-bearing; masking them does NOT weaken the
+  bench for anything that matters -- every documented flag (S/Z/H/P/N/C), every register,
+  and every memory/IO write is still compared EXACTLY, so a genuine regression still fails.
+  Evidence this is safe, not a rug-pull: enabling the mask immediately EXPOSED a real
+  register bug in the 0x15cb success path (HL must take the `pop hl` value = ctx.retAddr,
+  not the stale computed HL) -- masking X/Y surfaced it rather than hiding it; once fixed,
+  0x15cb is 22/22 and live-transparent. This removes the "WZ hazard" portability bucket:
+  routines that `ret` straight after `bit n,(hl)` (0x15cb opener, 0x3719 `bit 4,(hl) ret z`,
+  0x27a9 `bit 2,(hl) ret z`) are now portable, since the only thing that made them
+  unportable was the unreproducible X/Y at the ret. ports/z80flags.js bitHL8 (X/Y=0) is the
+  helper for these; the documented flags it sets are exact and the masked bits are ignored.
+
+## 2026-06-20 — T9.2: 0x2341 UPDATE_SCORE ported; T9.2 ceiling characterized
+- Ported 0x2341 UPDATE_SCORE (ports/update_score.js) to the full bar: bench 8/8 (both
+  paths, shadow a_p/f_p compared), npm 100/100, transparency byte-identical on the 4
+  scripts that dispatch it (attract 15 / free-play 4 / maze 5 / player-death 15). It is
+  the first NON-degenerate remaining routine: its recorded path runs the full BCD-add
+  body, calls only the already-ported 0x2334 (GET_PLAYER_SCORE_PTR) twice, reads the F2
+  DIP (port $61) twice from the io FIFO, and uses daa/sla/srl. All helpers already
+  existed; no new infra.
+- SHADOW-AF MODELING: the digit-index loop `srl b; ex af,af'; inc b; [dec hl; dec e;
+  djnz]; ex af,af'` parks the srl-b carry in the live bank and leaves f_p_out = the
+  LAST `dec e` flags (a_p unchanged). Reproduced by running the loop's dec8 on a copy of
+  flags_p and writing it back at every ret -- the bench compares f_p, so this is
+  load-bearing. Cycle accounting double-checks transcription completeness (per-instruction
+  T-state sum = recorded cycles, 432 on path1).
+- BONUS-AWARD TAIL NOT PORTED (throws, by design): when the score crosses a bonus
+  threshold the routine sets XTRAMEN via `bit n,(hl)` (WZ-sourced ret flags), `call
+  $3538` (un-ported), then `jp $259A` (non-local -- never returns to the hook). No record
+  takes it and transparency confirms no script reaches it live (the throw never fired).
+  The port throws on those sub-paths so a future credited-gameplay script that DID award
+  a life fails loudly here instead of diverging silently.
+- T9.2 CEILING (the durable finding): at 27/47 the cheap, bench-coverable leaves are
+  exhausted. The remaining unported-with-records routines split into:
+  (1) HAZARD BUCKET (~12): coroutine/ISR/jump-table substrate -- blocked BY DESIGN
+      (decision B 2026-06-19: they remain on the Z80 core; the hook declines them
+      transparently). 0x287f SHOOT belongs here (jp(hl) computed return + coroutine call).
+  (2) GUARD-PATH-ONLY records: 0x272d ERASE_PATTERN, 0x1908 DRAW_DIGIT, 0x197b DRAW_SCORE,
+      0x151a COLLISION_SENSE. The 5 attract-derived scripts only ever reach these routines'
+      early-ret/inactive guard (HL=0 / score=0 / bolt inactive / credits unchanged), so the
+      bench's "body" is a guard and the real bodies (0x2a40 digit blit; 0x1553 bolt engine)
+      are unreachable from BOTH the bench AND live transparency. Porting them now is a weak
+      bar. Unblocking them needs the standing follow-up: input scripts re-timed past frame
+      ~573 to credit coins and play into scored gameplay. Until then, 27/47 is the
+      real-bar ceiling and the rest is a T10 / new-scripts decision, not mechanical work.
+
+## 2026-06-20 (later) -- T9.2 ceiling RETRACTED; bolt engine ported via transparency; hooked-heavy-trace mode triggered; recorder parked
+
+CONTEXT: the 2026-06-19/-20 "T9.2 CEILING" entry above (27/47 is the real-bar ceiling;
+remaining bodies "unreachable from BOTH bench AND live transparency"; "unblocking needs
+new credited-gameplay scripts") is RETRACTED. It was wrong about WHY the gameplay bodies
+are unported. Evidence (reproducible; see session_status.md 2026-06-20 (later) + the new
+diagnostics tools/gameplay_probe.js and the de-risk run):
+
+1. Berzerk's ATTRACT MODE runs a DEMO GAME. attract-only (zero inputs) executes the full
+   engine: 0x1553 bolt engine at frame 977, 0x2a40 digit blitter at 581, 0x2341 / 0x287f
+   at 1007. So those bodies are NOT "unreachable from live transparency" -- transparency
+   on attract-only already exercises them. coin-start-first-maze missed them only because
+   it is 942 frames (they first fire ~954-1007): too SHORT, not mis-credited.
+2. 0x1553/0x2a40 have ZERO test-plan records because they are NON-LEAF (0x1553 does
+   `call $29A1`), and the generator excludes non-leaf invocations BY DESIGN (leaf-first
+   self-validation). This is a property of the routine, not the input script -- NO script
+   gives a non-leaf routine a hermetic record. The de-risk (a credited-play script with
+   real fire/move, reaching scored play) regenerated -> test plan and produced 0x1553=0,
+   0x2a40=0 records, 0 new leaf routines, 0 new path_ids vs the existing 5 scripts.
+
+DECISION A -- credited-gameplay scripts downgraded to MARGINAL. They are no longer a T9.2
+blocker. Value: possibly a few new leaf PATHS in already-covered routines (the de-risk
+added none). The standing "re-time scripts past frame ~573" action item is closed as
+not-the-lever (attract already exercises gameplay).
+
+DECISION B -- the gameplay bodies are ported via COMPOSE + LIVE TRANSPARENCY (the 0x2341
+methodology, extended past the leaf set). FIRST one done: 0x1553 MOVE_AND_DRAW_BOLT
+(composes the already-ported RTOAX 0x29a1; carry=collision via the live intercept flop,
+v256-independent; PORT_META pushes:[0x1578] for the inner-call residue). Validated:
+transparency byte-identical on all 5 scripts, NON-VACUOUS (0x1553 ran live 2042x attract,
+1843x player-death, 437x free-play, 437x maze-transition). bench 239/239, npm 100/100.
+
+DECISION C -- hooked/callee-included heavy-trace mode TRIGGERED (Option 2). Of the 34
+non-leaf routines that execute as CALL targets (vs 47 bench-leaf), a static scan buckets
+the 33 remaining as ~25 portable COMPOSITES, 7 HAZARD (ld sp / di / ei -> Tier 3), 1
+ambiguous. Composites are the MAJORITY of remaining portable work (vs ~8 clean leaves),
+so per the "most -> build" rule we will scope+build a capture mode that records the
+parent's read/write closure INCLUSIVE of ported callees so composites self-validate on
+the hermetic bench (the bench runs the real callee inline; an inclusive record matches),
+restoring a per-routine bench bar on top of transparency. This UNFREEZES heavy-trace.md
+(note #4 callee-exclusion) -- amendment + this entry per the schema-freeze discipline.
+LIMITATION to flag: only composites whose ENTIRE closure is deterministic-replayable
+become bench-able this way; a composite reaching a hazard sub-callee stays transparency-
+only. Design to be detailed in the T9.2 task file before implementation.
+
+DECISION D -- the cold-boot interactive recorder is PARKED (not built). Its stated
+justification (surface new test-plan records for the gameplay bodies) is refuted by the
+de-risk. Remaining merits, to build only on concrete need: (a) capturing the HUMAN-GATE
+spot-play session as a regression artifact, (b) deep-state (snapshot-mode) repro per
+lightweight-trace.md. The lightweight-trace.md DRAFT stays a draft (unfrozen).
+
+DoD RESCOPE: T9.2 finish line moved off literal "100% of trace-reachable routines" to the
+three-tier bar (Tier1 leaf bench+transparency / Tier2 composite compose+transparency,
++hermetic bench where Decision C applies / Tier3 hazard -> Phase-10 native), then
+HUMAN-GATE spot-play. See the task file Definition-of-done.
+
+## 2026-06-20 (later 2) -- Option 2 adopted via SEPARATE composite file (inclusive is NOT a superset)
+
+CORRECTION to the "additive/safe" framing in the 2026-06-20 (later) Decision C: that was
+verified only at the ROUTINE level (all 47 committed leaf routines retained). Sudnya
+independently verified at the RECORD level and found inclusive capture is NOT a strict
+superset of the committed exclusive plans. Re-confirmed here at full 3085 frames on
+attract-only (record diff keyed on (entry_pc, path_id), which is attribution-independent):
+  - 8 DROPPED (in exclusive, not inclusive): 0x1c6e (halt) + 0x1e6d x3 + 0x1e78 x4 -- all
+    hazard-bucket; under fold their guard-path subtrees pull in an ISR/coroutine access
+    that the interrupt-free self-check cannot reproduce, so inclusive omits them.
+  - 5 CONTENT-CHANGED (same key, different reads/writes): 0x157e, 0x197b, 0x1997, 0x2341 x2
+    -- composites whose EXCLUSIVE record accidentally self-validated (callees had no net
+    writes / self-served reads); inclusive folds in the callee reads.
+  - 96 identical, 76 new composite paths.
+Also independently confirmed: inclusive capture is un-hooked Z80 truth (the generator runs
+the bare core; the fold is pure access-attribution, not behaviour) -- sound, not circular;
+and the composite ports bench green against it.
+
+DECISION: adopt Option 2 via a SEPARATE file, NOT by regenerating the committed plans.
+  - Committed traces/test-plans/*.jsonl stay FROZEN and exclusive (they hold the 8 dropped
+    + 5 content versions; regenerating would lose/alter them).
+  - tools/gen_composite_plan.js emits traces/test-plans/composites-inclusive.jsonl =
+    inclusive records whose (entry_pc, path_id) is absent from every committed plan (drops
+    the 5 content-changed since path_id matches; never needs the 8 dropped). Record format
+    unchanged (heavy-trace.md note #4 amendment + test-plan.md amendment, both pending
+    ratification).
+  - The bench runs committed-exclusive (leaves) + composites-inclusive (composites). Each
+    composite port is validated by the hermetic composite record AND live transparency.
+  - Inclusive generation is MEMORY-HEAVY (each access duplicated up the frame stack); run
+    with NODE_OPTIONS=--max-old-space-size=4096 and/or capped frames in CI.
+
+This keeps the schema-freeze discipline intact (frozen artifacts untouched; additions are
+opt-in and separate) while restoring a per-routine hermetic bench bar for the ~25 Tier-2
+composites. Next: port 0x2a40 (digit blitter) against its composite record + transparency.
+
+## 2026-06-20 (later 3) -- Tier-2 lesson: composite bench-pass != transparency-pass (residue gates)
+
+Porting 0x2a40 PRINT_DIGITS (composes 0x29a3 + PRINT_CHAR in the BCD digit loop) surfaced a
+reusable rule for the remaining ~23 Tier-2 composites: a composite that passes the
+inclusive hermetic bench is NOT necessarily live-transparent. 0x2a40 passed its composite
+record 1/1 on the first try (register/data effects exact) yet live transparency DIVERGED on
+the nested digit-loop VRAM-stack residue (0x42e2-0x42ef). Reason: the bench STRIPS stack
+scaffolding (only data writes compared), but Berzerk's stack overlaps VRAM, so the live
+machine's transient push residue is observable and must be replayed via PORT_META.pushes.
+For a LOOPING composite the residue = the LAST iteration's DEEPEST frame (each iteration
+pushes/pops the same slots, so only the final occupant survives) -- here the last digit's
+push hl/push bc + `call $29DB` return (0x2A7E) + PRINT_CHAR's own internal push hl/de/af.
+CONSEQUENCE: the per-composite workflow is (1) bench-validate the logic against the
+composite record (fast, via Option 2), (2) derive PORT_META.pushes (deepest-frame residue)
++ exact path cycles, (3) register + confirm transparency. A composite is only Tier-2-DONE
+after (3). Until then, do NOT register it (a non-transparent live port regresses the green
+suite); keep it bench-validated and unregistered. 0x2a40 is at step (2).
+
+## 2026-06-21 -- schema amendments RATIFIED; 0x2a40 registered (bench-only live); long-composite decline finding
+
+RATIFIED (Sudnya): the heavy-trace.md + test-plan.md Option-2 amendments are ratified
+(separate composite file 76/20, zero key-overlap, frozen exclusive preserved, not-a-
+superset confirmed at full 3085 = 8 hazard drops + 5 content-changes). Marked in both docs.
+
+TIER CLASSIFICATION of the 20 composite-file routines (so Tier-3 isn't mistaken for an
+adoption target): TIER-3 (hazard, record-only, NOT hooked) = 0x1c6e, 0x151a, 0x1e6d,
+0x1e78, 0x1e59, 0x1d12, 0x287f (Sudnya's 7) + 0x1721 (`ld sp,$085E`, from the static
+stack-switch scan). TIER-2 portable = 0x1553 (done), 0x2a40 (this entry), and candidates
+0x15a0/0x272d/0x1505/0x14f3/0x2436/0x2b54/0x25e4/0x18cd/0x1f91/0x1f94. See task file.
+
+0x2a40 PRINT_DIGITS: ported (print_digits.js, composes 0x29a3 + PRINT_CHAR per digit),
+BENCH-validated 1/1 against its composite record, REGISTERED (bench 246/0, npm 100/100,
+transparency 5/5).
+
+KEY FINDING -- LONG COMPOSITES ALWAYS DECLINE (so they are bench-only live, not fast-path-
+validated like 0x1553): 0x2a40 is ~8800 T-states (6 digits x ~1300), FAR longer than the
+inter-interrupt gap (~4000 T = 41666 T/frame / 10 interrupts). The T9.1 decline gate
+(eventWithin(maxCycles)) therefore fires on essentially every dispatch -> 0x2a40 NEVER
+fast-paths in any of the 5 scripts (0 live dispatches); the Z80 core runs it, byte-
+identically by construction. CONSEQUENCES:
+  - "Dual-validated like 0x1553" is NOT achievable for long routines. 0x1553 (305 T) fast-
+    paths 4759x and is genuinely transparency-validated; 0x2a40 (8800 T) always declines,
+    so its live transparency is the core's (vacuously green). Its real validation is the
+    BENCH (Option-2 composite record). This is correct hook behaviour, not a deficiency:
+    atomic-charging a routine longer than the interrupt gap WOULD mis-time the interrupt,
+    which is exactly why the gate declines it.
+  - I attempted a runtime VRAM-stack-residue model (ctx.pushWords hook extension) for the
+    fast-path, but (a) it was only partially correct on a FORCED fast-path (fixed [-3..-12]
+    of the digit frame; [-1:-2] and [-13..-16] still diverged) and (b) it is MOOT because
+    0x2a40 never fast-paths. Reverted both the extension and the residue code (no
+    speculative/incomplete code). If a future shorter-digit caller (B<=3, < ~4000 T) ever
+    fast-paths 0x2a40, transparency will catch it loudly and the residue can be completed
+    then.
+  - GENERAL RULE for the remaining Tier-2 composites: SHORT ones (< ~4000 T, e.g. 0x15a0,
+    0x272d) get genuine fast-path transparency like 0x1553; LONG/loop-heavy ones get
+    bench-only live validation (always decline). Both are registered (bench coverage +
+    native-target readiness); the validation bar differs by length, and that must be stated
+    honestly per routine, not blanket-claimed as "transparency-validated".
+
+## 2026-06-21 -- 0x15a0 dual-validated; Phase-10 atomic-routine constraint; fast-path vs decline split
+
+0x15a0 BOLT_HIT_SCAN: ported (bolt_hit_scan_15a0.js), DUAL-VALIDATED -- bench 8/8 against
+its inclusive composite records AND live transparency byte-identical (12 fast-path
+executions: attract 5 / free-play 1 / maze 1 / death 5; coin-start dispatches none). It
+composes the already-ported 0x15cb once for the head actor ($0876) then once per actor in
+the circular list ($0870). Measured cost 186..2579 T over the 5 scripts; 2579 < the inter-
+interrupt gap (~4000 T), so it GENUINELY fast-paths (unlike 0x2a40) -- this is a real
+Tier-2 dual-validate, the model the user expected. bench 254/0, npm 100/100, transparency
+4 verified + 1 skip.
+
+  - NON-LOCAL-RETURN composition: 0x15cb does `pop hl; ret` on a hit (its framesToDrop=1),
+    returning straight to 0x15a0's caller. In the JS composition we (a) point ctx.retAddr
+    at the INNER call's return address (0x15ab head / 0x15b9 loop) so 0x15cb's `pop hl`
+    loads the value the real machine loads (HL_out), and (b) on the hit signal STOP the
+    scan and let 0x15a0's own hook return normally. The hooked 0x15a0 never pushed the
+    inner `call` frame, so a hit and a clean loop-exit both return to mem[entrySp] ->
+    0x15a0's framesToDrop is 0 either way (we clear the inner's signal). bench's 8/8
+    confirms this across whatever paths the records captured.
+  - DISASSEMBLY ARTIFACT corrected: cdoc/annotated-asm-berzerk.md shows `15a6 halt; 15a7
+    ex af,af'` for 0x15a0 -- a MIS-DECODE. The real ROM bytes at 0x15a4 are DD 2A 76 08 =
+    `ld ix,($0876)` (4 bytes, 0x15a4-0x15a7); the trace disassembler aligned mid-instruction
+    onto the operand bytes 76 08 (which decode as halt; ex af,af') before re-syncing at the
+    real `call $15cb` at 0x15a8. There is NO halt -- 0x15a0 is a clean Tier-2 composite, not
+    a frame-sync hazard. Verified by reading rom1.1d (offset 0x5a0). Lesson: trust the ROM
+    bytes over the trace-derived annotation for instruction boundaries.
+  - RESIDUE invisible by STACK PLACEMENT: all 54 invocations run with SP in WORK RAM
+    (0x0824/0x0826), so the inner-call return-address residue lands at 0x0822-0x0825,
+    outside the 0x4000-0x5FFF rendered window. PORT_META declares no pushes -- the residue
+    cannot affect the display hash (structural across all 54 invocations, unlike 0x157e
+    which got lucky with VRAM-window placement). The residue is also path-dependent (0x15ab
+    BC==0 / BC clean-loop / 0x15b9 loop-hit), which the static output-bank push model could
+    not express anyway; here it does not need to.
+
+PHASE-10 CONSTRAINT (the deeper meaning of the 0x2a40 always-decline finding) -- recorded
+here and in tasks/P10/T10.1: a routine LONGER than the inter-interrupt gap (~4000 T) always
+declines in Phase 9 (bench-only, 0 live fast-path dispatches), and it ALSO CANNOT be run as
+atomic JS in the Phase-10 NATIVE target. The native target drops the Z80 core and runs the
+ported routines directly under a JS-driven interrupt cadence; if such a routine executes
+atomically (as a single JS call), the interrupts that SHOULD fire mid-routine (the real
+routine spans several interrupt boundaries) are deferred to AFTER it -> the ISR reads V256
+(port 0x4E bit0) at a ~scanline-shifted beam position -> entropy phase (0x089F counter ->
+0x435C LCG seed -> RANDOM) drifts -> object placement diverges. So these routines need the
+SAME cooperative interrupt-interleaving / yield model as the Tier-3 coroutine substrate:
+they must yield at their original interrupt-check points, not run to completion atomically.
+KEY: "registered" != "native-ready" for them. The Phase-9 decline gate (which already
+declines them) is the symptom; Phase 10 must supply the cooperative scheduler that lets a
+ported routine yield mid-body. The fast-path/decline split observed in Phase 9 is exactly
+the Phase-10-readiness split: a routine that genuinely fast-paths (< ~4000 T: 0x1553,
+0x15a0) can run atomically in native; one that always declines (0x2a40, and any future
+long/loop-heavy composite) needs the yield model. The T9.2 coverage checklist now tags each
+composite fast-path-dual-validated vs always-decline-bench-only to mark this split.
+
+## 2026-06-22 -- Autonomous Tier-2 batch: 7 composites ported; disassembler bug; ISR-inflated-cost insight; portable set EXHAUSTED
+
+Continued T9.2 autonomously through the remaining portable Tier-2 composites. Ported and
+dual/bench-validated 7 routines this batch (37 total registered). Full tree green after each:
+bench 297/0 (37 routines), npm 100/100, transparency 5/5 (all ports together, byte-identical).
+
+NEW PORTS (with per-routine live bar = Phase-10-readiness tag):
+  - 0x272d DRAW_OBJECT -- FAST-PATH-DUAL. Composes DRAW_SPRITE (0x2817) x2 +
+    CALCULATE_MAGIC_IMAGE_RAM_ADDRESS (0x29a3). bench 12/12 + transparency 8 fast-path execs.
+    Low fast-path RATE (bimodal cost 86..3152; the gate uses worst-case maxCycles for every
+    call, so the common 86-cost calls mostly decline -- safe, just fewer fast-paths).
+  - 0x151a UPDATE_BOLT_SLOT -- FAST-PATH-DUAL. TIER MOVE Tier-3 -> Tier-2 (see below).
+    Composes 0x1553 + 0x15a0 (gated on collision carry) + 0x157e. bench 16/16 + transparency
+    ~14691 fast-path execs (validates the whole nested composition inline). BUG FOUND+FIXED by
+    the bench: `add iy,bc` sets the carry flag (ADD rr affects C/H/N/Y/X), which a following
+    `dec (iy+1); ret nz` exposes; first port modeled the add without flags -> stale C -> 2 fail
+    -> fixed with addHL16.
+  - 0x1505 UPDATE_ALL_BOLT_SLOTS -- FAST-PATH-DUAL. djnz loop over B (INPUT) bolt slots
+    composing 0x151a. bench 8/8 + transparency ~5057 execs.
+  - 0x14f3 STEP_BOLT_GROUPS -- ALWAYS-DECLINE-BENCH-ONLY. Composes 0x1505 x3 (3rd via
+    fall-through tail). Own worst ~4095 >= ~4000 gap -> 0 live dispatches (confirmed
+    "unexercised"). bench 4/4.
+  - 0x1f91 / 0x1f94 SET_OBJECT_IMAGE -- FAST-PATH-DUAL. 0x1f91 masks dir & falls into 0x1f94;
+    both compose SET_VELOCITY (0x2b3d) then store an image ptr. di/ei = critical section (not
+    a coroutine; di..ei nets IFF unchanged, which the hook does not touch). bench 1/1 each +
+    transparency 54 / 1 execs. FIRST VRAM-stack fast-path composites this batch: SP in VRAM,
+    so the `call $2b3d` return-addr residue 0x1F97 is visible -> pushes:[0x1f97] (validated by
+    transparency, confirming the residue model works for VRAM-SP fast-path routines).
+  - 0x25e4 MAGIC_ADDR_TO_DE -- FAST-PATH-DUAL. ld b,$10; call $29a3; ex de,hl; ret. bench 1/1
+    + transparency 1640 execs. Residue 0x25E9 (VRAM SP).
+
+TIER MOVE 0x151a (Tier-3 -> Tier-2), flagged for Sudnya's review/veto: 0x151a was bucketed
+Tier-3 with reason "un-benched callees / coroutine". ROM re-read (skoolkit + raw bytes) shows
+NO intrinsic hazard (no ld sp / jp (hl) / halt / coroutine) -- a plain per-slot bolt state
+machine with iy-relative state + ordinary early rets. Its three callees (0x1553, 0x15a0,
+0x157e) are now all ported (the actual blocker), and all preserve IY (verified). So the
+Tier-3 reason was a DEPENDENCY-block, now cleared. Validated to the full bar (bench 16/16 +
+transparency ~14691). Sudnya can veto.
+
+DISASSEMBLER BUG (the user's "read the ROM bytes" warning, vindicated): the trace-derived
+z80 disassembler (tools/t61 / z80dis.js) reports `ld ix,nn`/`ld iy,nn` (DD/FD 21 nn nn) with
+LENGTH 2 instead of 4 -- so it re-decodes the operand bytes as phantom instructions. This is
+the same class of artifact as the 0x15a0 "halt". It bit 0x1505: the phantom `ld a,e; ld b,e`
+made the first port use B=E (wrong loop count) -> bench 8 fail -> traced to the mis-decode.
+The REAL 0x1505 takes its loop count B as an INPUT register. The annotated-asm-berzerk.md is
+built with this buggy disassembler and is NOT a reliable boundary source. AUTHORITATIVE DECODE
+for the rest of the batch: disassembler/oracle/skoolkit_instructions.jsonl (correct where
+present, but has GAPS at DD/FD-prefixed instructions -- FDCB/FD36/FD21 missing) cross-checked
+with raw ROM bytes (disassembler/oracle/berzerk_flat.bin) and an FD/DD length rule. The
+already-validated ports (0x272d, 0x151a) were re-verified against skoolkit and match exactly.
+
+ISR-INFLATED COST INSIGHT (refines the FAST-PATH vs ALWAYS-DECLINE split): the heavy-trace
+`cycle_count` is entry..ret wall-clock, so when an interrupt fires MID-routine the ISR's
+cycles are INCLUDED -> the measured MAX over-states the routine's OWN cost. For STRAIGHT-LINE
+routines (fixed own cost) the measured max is pure ISR noise; 0x25e4 (own 167, measured max
+5085) and 0x1f91/0x1f94 (own 257/246, measured max 1295) were initially mis-labeled
+ALWAYS-DECLINE by the measured-max metric but are really FAST-PATH. RULE: classify by OWN
+cost (the port's computed ctx.cycles worst case over PATHS, not the ISR-inflated trace max).
+For straight-line routines set maxCycles = own cost (fast-paths); for branching routines
+maxCycles = measured max is still SAFE (it only over-declines, never under-counts).
+
+PORTABLE TIER-2 COMPOSITES EXHAUSTED. Of the 20 composite-file routines: 10 ported (0x1553,
+0x15a0, 0x272d, 0x151a, 0x1505, 0x14f3, 0x1f91, 0x1f94, 0x25e4, 0x2a40); 10 not portable:
+  - INTRINSIC Tier-3 hazard (7): 0x1721 (ld sp,$085E), 0x1c6e (halt), 0x1d12 (jp (hl)),
+    0x1e59 (ld sp,hl), 0x1e6d (ld sp,$0870), 0x1e78 (ld sp), 0x287f (jp (hl)+coroutine).
+  - BLOCKED on a Tier-3 callee (3, NEW assignments this batch):
+      * 0x2436 -- `call nz,$1c6e` (conditional call to the Tier-3 halt routine). Also long
+        (always-decline). Cannot compose unported 0x1c6e.
+      * 0x2b54 -- `call $1e78` (Tier-3 ld sp stack-switch). Cannot compose unported 0x1e78.
+      * 0x18cd -- `ld hl,$0000; add hl,sp; ld (hl),a` builds a BCD temp at the live SP then
+        passes that SP as a pointer to PRINT_DIGITS (0x2a40). The port ctx deliberately
+        EXCLUDES sp (bench buildCtx + live buildLiveCtx both omit it), so HL=SP is not
+        computable in a port; and it composes the always-decline 0x2a40. Stack-relative-temp
+        hazard -> Tier-3. (Exposing SP in ctx would be an architecture change -- NOT taken;
+        left for Sudnya / Phase-10.)
+This is autonomous stop-condition (a): portable Tier-2 composites exhausted. Remaining
+coverage work needs the Phase-10 native cooperative-yield substrate (Tier-3 + always-decline).
+
+## 2026-06-22 -- Scope-A finish line: hooked play build wired; T9.2 -> awaiting-human
+
+T9.2 set to awaiting-human at the Scope-A ceiling (37 routines; cdoc/done-definition.md).
+Verified state (re-run): npm 100/100; bench 297/0 across 37 routines (incl. composite plan);
+transparency 5/5 hooked==un-hooked byte-identical. Tier-3 (10 deferred) enumerated in the
+T9.2 checklist + the 2026-06-22 batch entry above. Two Sudnya-side Scope-A items remain:
+(a) the HUMAN-GATE spot-play, (b) MAME goldens generated+committed.
+
+PLAY BUILD + HOOK-LIVENESS PROOF. The shell (shell/index.html + shell.js) previously ran the
+BARE emulator -- it never installed the port hook, so it tested nothing for the gate. Fixed:
+the shell now installs makePortHook(PORTS, PORT_META, scheduler) by DEFAULT (the hybrid IS
+the Scope-A deliverable). Because the 37 ports are byte-transparent (the game looks identical
+hooked vs un-hooked), liveness is surfaced three ways, weakest to strongest:
+  1. Boot console line `port hooks: ENABLED (37 routines)` -- WEAK (proves the install call
+     ran, not that dispatch happens).
+  2. On-page badge with a LIVE dispatch counter (cumulative dispatches + distinct routines /
+     37), updated every frame -- the primary proof; "watch the counter climb".
+  3. `?breakrandom=1` -- substitutes a deliberately-wrong RANDOM (0x2678) to prove the hook is
+     load-bearing. Verified HEADLESSLY (/tmp, not committed): on attract-only, normal-hooks
+     reproduce the un-hooked frame hashes byte-identically for all 3085 frames, while the
+     broken-RANDOM port first DIVERGES at frame 950 (once the attract demo consumes entropy).
+     So breaking a JS port breaks ONLY the hooked build -> hooks are unquestionably live.
+`?hooks=0` runs the bare emulator for A/B comparison. Step-by-step play instructions (launch,
+ROM wiring, controls, what-to-look-for checklist, the break test) live in machine/PLAY.md.
+The shell change is surgical (hook install + counter overlay + a query-param toggle); the
+default-on behavior is safe because hooked==un-hooked is proven byte-identical.
+
+## 2026-06-22 -- Play-harness coin/start timing (input plumbing confirmed correct)
+
+Spot-play reported coin/start/fire dead in the shell (identical with ?hooks=0 -> not the
+ports). Root cause is the timing already documented in entropy-berzerk.md sec4, now confirmed
+end-to-end: the CPU first samples the input ports at POST completion (~frame 573); inputs
+applied earlier are released before any read, so no script (or early keypress) ever credits a
+coin -- coin-start-first-maze is byte-identical to no-input for all 942 frames. Applied AFTER
+frame ~574 the coin credits (CMOS 0x08A4/0x08A5: credits 0->1), start consumes it, and port
+0x48 (P1 joystick) begins polling (=player active; the real in-game signal -- ram-map's 0x436e
+"game_active_flag" does NOT flip, label is misleading). The key->bit map + active-low polarity
+are correct (COIN1/START1 SYSTEM 0x49, BUTTON1 P1 0x48 bit4). HARNESS-ONLY fix (no port /
+PORT_META change): shell latches coin/start as fixed-length pulses (a tap suffices) and shows
+READY / CREDITS / IN-GAME readouts so the coin register is visible; PLAY.md documents the
+wait-for-READY-then-coin flow. This also recontextualizes the earlier "credited play adds no
+new records" de-risk finding: credited play never STARTED in those runs (coin too early), so
+its zero-new-records result was partly an artifact of the un-credited machine, not only the
+leaf-first exclusion -- though the Tier classification (non-leaf composites reachable via
+attract) stands independently and is unaffected.
+
+## 2026-06-22 -- Segmented-trace schema change APPROVED (long/interrupted-routine validation)
+
+DECISION (Sudnya sign-off, 2026-06-22): adopt the "interrupts as recorded yield boundaries"
+approach to make long / interrupted routines per-segment benchable and portable as coroutines,
+and authorize the supporting heavy-trace schema extension. Full plan:
+cdoc/long-routine-validation-plan.md. Governance constraints honored: the committed exclusive
+test plans and existing goldens stay FROZEN; the boundary snapshots are added as a SEPARATE
+segmented-trace file (mirroring the composites-inclusive.jsonl precedent), not by mutating the
+frozen exclusive plans. Per-boundary record carries: approx cycle offset, boundary PC, a full
+register snapshot INCLUDING the hidden WZ register, and the live-memory snapshot needed to
+re-enter; ISR entry/return is marked.
+
+EVIDENCE (why this is sound, not a leap): an independent interrupt-dependency probe
+(machine/tools/isr_dep_probe.mjs; re-emulates attract-only 3085f from the flat oracle ROM,
+reuses the heavy_trace_capture frame-tracking technique). Over 25,130 serviced interrupts
+(8.15/frame == the 2 IRQ + 8 NMI hardware model, a faithfulness check) and 391,347 mainline
+invocations, the STRICT spanning-dependency test -- "does an interrupted routine read, after
+the ISR returns, an address that ISR wrote during the split, before the routine overwrote it"
+-- fires only 645 times across exactly 5 routines: 0x1e78(525), 0x1c6e(87), 0x287f(15),
+0x2436(8) [all already Tier-3 hazards], and 0x188b(10) [ATTRACT_DEMO_LOOP, the top-level
+driver loop]. ZERO of the 37 cleanly-ported routines show any strict dep. Every dependent
+address is in VRAM 0x40xx-0x43xx (the stack-overlaps-VRAM / coroutine-substrate region). The
+cleanly-ported routines DO read ISR-maintained state heavily (global provenance: tens of
+thousands of reads) but only as STABLE prior-frame values -- already captured as recorded
+inputs, which is why they bench clean. Positive control: the probe sees the ISR maintaining
+the RNG-phase counter 0x089f/0x08a0 (2510 writes each), so detection is live; RNG 0x2678 shows
+no ISR provenance (true negative -- it reads its own mainline-written seed).
+
+CONSEQUENCE: for long-but-CLEAN routines, segments are independent pure functions; the port
+need not reproduce the ISR's timing-seeded CONTENT at a boundary -- run the ISR (or just tick
+the timers it maintains) and resume. The genuine ISR-output entanglement is quarantined to the
+5 routines above, which stay on the Scope-B coroutine track. Notably, this dynamic data-flow
+method -- with no knowledge of the structural hazard classification -- REDISCOVERED essentially
+the same hazard set, an independent corroboration that the Scope-A/Scope-B boundary is drawn
+correctly. CAVEAT recorded: the SP-depth frame tracker is unreliable inside coroutine
+stack-swaps (the preempted-routine histogram had phantom RAM/VRAM entryPCs and was discarded),
+but that unreliability is confined to the hazard regions; clean-routine tracking is reliable,
+so "strict == 0 for clean routines" holds and any undercount falls within the already-excluded
+set. NEXT STEP: pilot the segment chain on one long clean routine -- 0x2a40 PRINT_DIGITS
+(~8800 T, today ALWAYS-DECLINE/bench-only) -- behind a flag; green pilot converts "long
+routines" from a Scope-B blocker into a mechanical, verifiable porting track.
+
+## 2026-06-22 -- Pilot 0x2a40 segment-chain GREEN (V1+V2)
+
+PILOT RESULT (cdoc/pilot-2a40-segment-chain-workorder.md): segment-chain capture + per-segment validation for 0x2a40 PRINT_DIGITS PASSES byte-exact -- 20 invocations / 19 multi-segment / 73 segments; V1 (lossless segmentation: ordered segments+ISR-interval write_sets + last regs_out == heavy_trace_capture INCLUSIVE whole) 20/20; V2 (per-segment snapshot-sufficiency: each segment replayed on a fresh Z80 core from entry_pc+entry_regs+read_set alone reproduces regs_out+write_set, bench X/Y mask) 73/73. New code only: machine/tools/gen_segmented_trace.js + machine/tests/segment_chain_2a40.test.js + traces/segmented/attract-only.0x2a40.jsonl; no port/PORT_META/print_digits/frozen-schema/golden change; no WZ fabricated (NA for this clean routine). Confirms "interrupts as recorded yield boundaries" at the data level -> long-but-clean routines are per-segment benchable; justifies the coroutine-port follow-on (separate task, not done here).
+
+## 2026-06-22 -- Pilot 0x2a40 coroutine-port V3 GREEN (V3a+V3b)
+
+PILOT RESULT (cdoc/pilot-2a40-coroutine-port-workorder.md): generator/coroutine variant of the 0x2a40 PRINT_DIGITS port PASSES. V3a output-equivalence 20/20 (coroutine drained == shipped whole-routine port, byte-identical writes+regs_out, bench X/Y mask; yielding does not change output) and V3a-anchor 20/20 (shipped port data-writes == recorded own-write reconstruction, stack stripped). V3b cadence 20/20 within +/-1 -- in fact EXACT (serviced interrupts == recorded n_interrupts, 0 error) for all 20 -- because the port's hand-calibrated cycle table reproduces the core's real own-cycle total exactly (diff 0) so the budget reaches every recorded boundary. V3c partition (diagnostic) 85% (45/53 interrupts serviced alone in their interval; the 15% are >=2 interrupts that fell in one atomic seam). FINDING: cadence must be driven from the recorded interrupt schedule, NOT a fixed routine-internal own-cycle gap -- a fixed G=4070 predictor hits exact only 8/20, within +/-1 only 12/20 (max err 3), because un-modeled ISR durations perturb the routine-own-cycle spacing of interrupts; the Scope-B coroutine driver must source the schedule from the interrupt controller (per long-routine-validation-plan.md S5). New code only: machine/ports/print_digits_coro.js + machine/tests/coro_2a40.test.js; shipped print_digits.js / PORT_META / 37 ports / frozen schemas / composites-inclusive / goldens untouched; no ISR ported (cadence from recorded chain); no WZ fabricated; no cycle-exact modeling. Regression: V1/V2 20/20+73/73, whole bench (bench.test.js 6/6, composites-inclusive 0x2a40 1/0) still green. Coroutine-resumability proven for one long clean routine -> de-risks the Scope-B core-free build; generalizing the driver across routines + the Tier-3 hazard substrate remains separate Scope-B work.
+
+## 2026-06-22 -- Renderer visible-window fix (score was cropped off-screen)
+
+FINDING + FIX (user-directed, via credited-gameplay capture traces/scripts/kill_robots.jsonl): the on-screen player score was never visible because video.js renderToRGBA rendered VRAM scanlines [0,224) instead of the true visible window. Per cdoc/hardware-berzerk.md sec5 the displayed rows are the non-vblank scanlines [VBEND,VBSTART) = [0x20,0x100) = [32,256) (224 rows). The old row-0-anchored window painted the top stack/var band (VRAM 0x4000-0x43ff = rows 0-31) as garbage AND cropped the bottom status strip where the score is drawn (scanlines ~245-253). Proven: in a credited game the player scored 500 (10 robot kills x 50; score BCD at 0x433e-0x4340, drawn by 0x2341 ADD_AND_DRAW_SCORE -> PRINT_DIGITS 0x2a40 with HL=0x433e, DE=0xd500 -> magic-window writes to VRAM 0x5ea0-0x5fa6); the "500" digits were present in VRAM at scanlines 245-253 but never rasterized. FIX: renderToRGBA now maps VRAM scanline vy -> screen row vy-VBEND and skips rows outside [VBEND, VBEND+224); same 256x224 output size, no shell/canvas change. NOT a scoring/game-logic bug -- the score, collision, and kill accounting were all correct. Files: src/video.js (added VBEND/VISIBLE_ROWS consts + window remap), tests/video.test.js (updated the MSB/nibble test to the corrected geometry + added a top-band-not-rendered assertion). npm test 102/102. Nothing committed.
+
+## 2026-06-22 -- Credited-gameplay coverage (kill_robots.jsonl): universe 83 -> 95 (+12)
+
+COVERAGE RESULT (cdoc/credited-gameplay-capture-workorder.md; report cdoc/credited-gameplay-coverage.md): traces/scripts/kill_robots.jsonl is the first trace to enter CREDITED play (port 0x48 read 87,778x; never read in attract). RAM-map state-change proofs: coin credited (0x08A3 0->1 @f1018); game started (0x4344 0->1, credit consumed @f1419); KILL scenario CONFIRMED (player score 0x433E-0x4340 BCD 000000->000500 in 10 steps of +50 = 10 robot kills); DEATH scenarios 2/3 CONFIRMED (lives 0x434c 5->4->3->2->1 = 4 deaths); game-over PARTIAL (terminal transition at f4812 -- lives reset 1->5, 0x4344->2 -- consistent with game-over but counter does not cleanly pass through 0); maze-transition + Evil-Otto NOT captured (need a longer/dawdle session, follow-on). Reachable-routine universe 83 (attract) -> 95 (credited), +12 new entryPCs: 0x1851 0x186a 0x18b2 0x18f1 0x18f7 (score/credit display subtree) + 0x2b6b 0x2b97 0x2c51 0x2db3 0x2dce (credited start/game-init) + 0x33a7 0x361c (start/sound/config). The 12 are credit/start/score-accounting routines the attract demo never runs; NOT ported here (separate follow-on). Score lives at 0x433E-0x4340 (player-1 BCD) NOT 0x089C (demo counter). Capture-only; no engine/port/PORT_META/schema changes; nothing committed.

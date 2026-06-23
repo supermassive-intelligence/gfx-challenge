@@ -20,6 +20,7 @@ const { header, records } = parseScript(fs.readFileSync(inputPath, 'utf8'));
 const machine = new Machine();
 machine.loadRoms(assembleRoms((name) => romData[name]));
 machine.reset();
+if (process.env.BERZERK_PORT_HOOKS) machine.installPortHooks();  // T9.1 dispatch
 const player = new ScriptPlayer(machine.input, header, records);
 
 const hashes = [];

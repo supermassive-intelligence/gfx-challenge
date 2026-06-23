@@ -145,20 +145,32 @@ test('Section 4.5: color RAM read/write at block boundaries', () => {
 // ---------------------------------------------------------------------------
 test('Section 4.5: renderToRGBA maps MSB-first with high/low color nibbles', () => {
   const v = new Video();
+  // The visible window is scanlines [VBEND=32, 256); VRAM scanline 32 is screen row 0.
+  // Write at VRAM offset 32*32 = 0x400 (first visible scanline) so it lands at screen y=0.
+  const offs = 32 << 5;            // 0x400 -- VRAM scanline 32 == screen row 0
   // VRAM byte 0x81 = bit7 (leftmost) and bit0 (rightmost) set.
-  v.writeVram(0, 0x81);
-  // colorAddr(0) == 0; high nibble = 1 (R), low nibble = 4 (B).
-  v.writeColor(0, 0x14);
+  v.writeVram(offs, 0x81);
+  // high nibble = 1 (R), low nibble = 4 (B).
+  v.writeColor(v.colorAddr(offs), 0x14);
   const buf = new Uint8Array(256 * 224 * 4);
   v.renderToRGBA(buf);
 
-  // Pixel 0 (leftmost, bit7 set, high nibble=1=R) -> red.
+  // Pixel 0 (leftmost, bit7 set, high nibble=1=R) -> red, at screen row 0.
   assert.deepStrictEqual([buf[0], buf[1], buf[2], buf[3]], [0x80, 0, 0, 0xff]);
   // Pixel 1 (bit6 clear) -> black.
   assert.deepStrictEqual([buf[4], buf[5], buf[6], buf[7]], [0, 0, 0, 0xff]);
   // Pixel 7 (rightmost, bit0 set, low nibble=4=B) -> blue.
   const p7 = 7 * 4;
   assert.deepStrictEqual([buf[p7], buf[p7 + 1], buf[p7 + 2], buf[p7 + 3]], [0, 0, 0x80, 0xff]);
+
+  // The top stack/var band (VRAM rows 0-31) is in vblank and must NOT render: a pixel
+  // written at VRAM offset 0 stays off-screen (no longer painted at screen row 0).
+  const v2 = new Video();
+  v2.writeVram(0, 0xff);
+  v2.writeColor(0, 0x14);
+  const buf2 = new Uint8Array(256 * 224 * 4);
+  v2.renderToRGBA(buf2);
+  assert.deepStrictEqual([buf2[0], buf2[1], buf2[2], buf2[3]], [0, 0, 0, 0xff]);
 });
 
 test('reset restores control/latch/intercept to power-on state (Section 4.2)', () => {

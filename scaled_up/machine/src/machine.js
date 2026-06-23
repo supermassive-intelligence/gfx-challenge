@@ -15,6 +15,7 @@ import { Video } from './video.js';
 import { Scheduler } from './scheduler.js';
 import { Input } from './input.js';
 import { Sound, SilentBackend } from './sound.js';
+import { makePortHook } from './port-hook.js';
 
 export class Machine {
   constructor({ audioBackend, dipOverrides } = {}) {
@@ -67,6 +68,13 @@ export class Machine {
     if (port === 0x4d) { this.scheduler.disableNmi(); return; }      // [§5.5]
     if (port === 0x4f) { this.scheduler.setIrqEnable(data & 1); return; } // [§5.4]
     // 0x66/0x67 LED writes and DIP-range writes: ignored.
+  }
+
+  /** Install the T9.1 port-dispatch hook so registered JS ports (machine/ports/)
+   *  run in place of their Z80 routines at CALL targets. Off by default; opt-in so
+   *  the un-hooked machine remains the reference. Pass custom maps for tests. */
+  installPortHooks(ports, meta) {
+    this.cpu.installPortHook(makePortHook(ports, meta, this.scheduler));
   }
 
   /** Load assembled program ROM data: { ROM0: Uint8Array, ROM_MAIN: Uint8Array }. */

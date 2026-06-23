@@ -16,6 +16,11 @@
 export const VRAM_SIZE = 0x2000;   // 8 KB, 32 bytes/scanline
 export const COLOR_SIZE = 0x800;   // 2 KB
 
+// Visible vertical window (cdoc/hardware-berzerk.md sec5: vsync chain). The displayed
+// scanlines are the non-vblank rows [VBEND, VBSTART); VBSTART-VBEND = 224 visible rows.
+export const VBEND = 0x20;          // 32: first visible scanline (top of screen)
+export const VISIBLE_ROWS = 0x100 - VBEND;   // VBSTART(0x100) - VBEND = 224
+
 // 74181 logic-mode (M=1) F output by select, on full bytes (each bit is
 // independent in logic mode). A = shifted data, B = current VRAM. This is the
 // "F (active-high)" column of spec Section 4.3 (== datasheet positive logic).
@@ -113,10 +118,19 @@ export class Video {
 
   // Rasterize VRAM+color RAM to an RGBA byte buffer (256 wide; 224 visible
   // rows = 224*256*4 bytes). [Section 4.5] Display-only; RGBI levels approximate.
+  //
+  // The visible window is the non-vblank scanlines [VBEND, VBSTART) = [32, 256) per the
+  // vsync chain (cdoc/hardware-berzerk.md sec5: VBEND=0x20, VBSTART=0x100; 256-32=224
+  // visible rows). A VRAM scanline `vy` therefore maps to screen row `vy - VBEND`. The
+  // top band (VRAM rows 0-31 = 0x4000-0x43ff: boot flag / coroutine stacks / game vars
+  // overlapping VRAM) is in vertical blank and NOT displayed; the BOTTOM status strip --
+  // including the player score drawn at scanlines ~245-253 -- IS visible. The previous
+  // row-0-anchored window (offs>>5 >= 224) rendered the top stack/var band as garbage and
+  // cropped the bottom strip, so the score never appeared on screen.
   renderToRGBA(buf) {
     for (let offs = 0; offs < VRAM_SIZE; offs++) {
-      const y = offs >> 5;            // 32 bytes per scanline
-      if (y >= 224) continue;        // only 224 lines visible
+      const y = (offs >> 5) - VBEND;       // VRAM scanline -> screen row
+      if (y < 0 || y >= VISIBLE_ROWS) continue;   // outside the visible window
       const data = this.vram[offs];
       const color = this.colorram[this.colorAddr(offs)];
       const baseX = (offs & 0x1f) << 3;

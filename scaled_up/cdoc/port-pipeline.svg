@@ -1,4 +1,4 @@
-<svg width="820" height="934" viewBox="0 0 820 934" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+<svg width="820" height="1008" viewBox="0 0 820 1008" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
 <title>Z80 arcade ROM to JavaScript port — 10-phase pipeline (reconciled with task state, 2026-06-17)</title>
 <desc>Ten phases in four bands (Build and prove, Understand, Port, Finish). Each row shows the phase and the ability it unlocks, a blue IN chip (what it needs), a green OUT chip (what it produces), and an amber pill naming the independent reference it is proven against. Two trust gates (boot-window equivalence at Phase 3; gameplay equivalence at the Phase 8 bench). A YOU ARE HERE marker sits at end of Phase 4.</desc>
 <defs>
@@ -15,10 +15,10 @@
 .rule{stroke:#e5e7eb;stroke-width:1;}
 </style>
 </defs>
-<rect x="0" y="0" width="820" height="934" fill="#ffffff"/>
+<rect x="0" y="0" width="820" height="1008" fill="#ffffff"/>
 
 <text x="40" y="30" class="t1" font-size="20" font-weight="700">Z80 Arcade ROM &#8594; JavaScript Port</text>
-<text x="40" y="50" class="t2" font-size="12">Ten phases. Each step is proven against an independent reference before the next one leans on it. <tspan class="t3">(map reconciled with tasks, 2026-06-17)</tspan></text>
+<text x="40" y="50" class="t2" font-size="12">Ten phases. Each step is proven against an independent reference before the next one leans on it.</text>
 
 <text x="96" y="72" class="t3" font-size="9" letter-spacing=".6">PHASE &amp; ABILITY UNLOCKED</text>
 <rect x="372" y="64" width="13" height="10" rx="2" class="inb"/><text x="390" y="72" class="t3" font-size="9" letter-spacing=".4">IN (needs)</text>
@@ -129,10 +129,10 @@
 <!-- P10 -->
 <rect x="54" y="778" width="726" height="58" rx="8" class="row"/>
 <circle cx="74" cy="807" r="13" class="num"/><text x="74" y="811" class="numt" font-size="12" text-anchor="middle">10</text>
-<text x="96" y="803" class="t1" font-size="12.5" font-weight="700">Remove the scaffold</text>
-<text x="96" y="821" class="t2" font-size="9.3" font-style="italic">ability: pure-JS game + reusable pipeline</text>
+<text x="96" y="803" class="t1" font-size="12.5" font-weight="700">Ship two build targets</text>
+<text x="96" y="821" class="t2" font-size="9.3" font-style="italic">ability: native (core-free) + emulator, one codebase</text>
 <rect x="372" y="783" width="216" height="23" rx="6" class="inb"/><text x="380" y="798" font-size="8.5" class="inl">IN</text><text x="398" y="798" font-size="9" class="t1">100% ported machine</text>
-<rect x="372" y="808" width="216" height="23" rx="6" class="outb"/><text x="380" y="823" font-size="8.5" class="outl">OUT</text><text x="402" y="823" font-size="9" class="t1">standalone JS game (no core)</text>
+<rect x="372" y="808" width="216" height="23" rx="6" class="outb"/><text x="380" y="823" font-size="8.5" class="outl">OUT</text><text x="402" y="823" font-size="9" class="t1">native + emulator (shared code)</text>
 <rect x="600" y="791" width="172" height="32" rx="7" class="pill"/><text x="686" y="811" class="t1" font-size="10" font-weight="600" text-anchor="middle">flush test + feel</text>
 
 <!-- footer -->
@@ -140,5 +140,11 @@
 <text x="54" y="866" class="t1" font-size="10.5"><tspan font-weight="700">The thread &#8212; never trust:</tspan> anchor every step to something already proven. Two gates, not one.</text>
 <text x="54" y="881" class="t2" font-size="9.5">CPU &#8594; ZEXALL+SST &#183; machine &#8594; MAME (boot window 0&#8211;258) &#183; routine trace &#8594; MAME (input-keyed)</text>
 <text x="54" y="895" class="t2" font-size="9.5">each routine &#8594; its trace (hermetic bench) &#183; finished game &#8594; bench + boot regression.</text>
-<text x="54" y="915" class="t2" font-size="9.5">Artifact: emulator &#8594; hybrid &#8594; pure JS.  Reusable for the next Z80 game; only phases 1&#8211;2 &amp; 6 are game-specific.</text>
+<text x="54" y="915" class="t2" font-size="9.5">Artifact: emulator &#8594; hybrid &#8594; native (emulator retained as oracle).  Reusable for the next Z80 game; only phases 1&#8211;2 &amp; 6 are game-specific.</text>
+
+<!-- status band (separate from the diagram) -->
+<rect x="40" y="948" width="740" height="48" rx="9" fill="#e7f0ff" stroke="#bcd4f5" stroke-width="1"/>
+<rect x="40" y="948" width="5" height="48" rx="2.5" fill="#3b82f6"/>
+<text x="58" y="967" class="t1" font-size="10.5" font-weight="700">STATUS &#183; 2026-06-22</text>
+<text x="58" y="982" class="t1" font-size="9.5">Phases 1&#8211;8 <tspan font-weight="700">done</tspan>.  Phase 9 at the Scope-A ceiling: 37 routines ported, hybrid plays &#8212; spot-play sign-off + MAME goldens pending.  Phase 10 (Scope B) deferred.</text>
 </svg>

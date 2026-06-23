@@ -119,6 +119,25 @@ generator (T7) and bench (T8) MUST account for them. Numbered to match the
    is not. Leaf-first porting (T9) sidesteps this; T7/T8 must be designed around
    it (don't assume a routine's effect is self-contained if it calls out).
 
+   AMENDMENT 2026-06-20 (T9.2 Option 2; RATIFIED 2026-06-20 by Sudnya after Cowork
+   verification: separate composite file 76 records/20 routines with ZERO key-overlap,
+   frozen exclusive defaults preserved, not-a-superset confirmed at full 3085 = 8 hazard
+   drops + 5 content-changes. The default EXCLUSIVE behaviour above stays FROZEN). `captureTrace({inclusive:true})` adds an
+   OPT-IN mode that attributes each access to EVERY open frame, so an invocation's
+   `read_set`/`write_set` become its full SUBTREE CLOSURE (callees included, in
+   execution order). This lets non-leaf composites self-validate hermetically (the
+   generator's replay runs callees inline, reproducing the folded accesses), restoring
+   a bench bar past the leaf set. It is OFF by default; the committed exclusive plans
+   are unaffected. LIMITATION (ISR-fold): an invocation interrupted mid-execution folds
+   the ISR's accesses into its closure, which the interrupt-free self-check cannot
+   reproduce -> that record is excluded (same as today). CONSEQUENCE: inclusive is NOT a
+   strict superset of exclusive -- it DROPS records whose subtree hits an ISR/coroutine
+   (measured: 8 on full attract-only, all hazard-bucket) and CONTENT-CHANGES records
+   whose callees added folded reads (5 on attract-only). So inclusive output is consumed
+   as a SEPARATE composite plan (records keyed (entry_pc,path_id) absent from the frozen
+   exclusive plans), never by regenerating them. Inclusive capture is memory-heavy (deep
+   frames duplicate access entries up the stack) -- raise the Node heap / cap frames.
+
 5. **Stack-discipline-defeating routines** (coroutine/dispatch: CREATE_JOB,
    MAN_INIT, LTABLE) trace unreliably — see "Known limitation" above. The MAME
    fidelity spot-check and early porting must use ordinary-CALL/RET leaf routines.

@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { Z80CPU } from '../src/cpu/z80.js';
 import { assembleRoms, ROM_FILES } from '../src/roms.js';
 import { captureTrace } from './heavy_trace_capture.js';
+import { makeDis } from './t61/z80dis.js';
 
 // Memory fill rules mirrored from cdoc/hardware-berzerk.md / src/memory.js:
 //   ROM0 0x0000-0x07FF, ROM1-5 0x1000-0x37FF  -> game ROM image (code + const)
@@ -128,6 +129,70 @@ export function replayFromRecord(romBytes, rec) {
   return { ok:true, regs_out: regsFromState(cpu.getState()), writes, pcPath };
 }
 
+/**
+ * --explain support: re-run ONE record on a fresh core (identical setup to
+ * replayFromRecord) and return the executed instruction trace -- the exact pcPath that
+ * generation computes and then discards down to path_id -- with each instruction's DATA
+ * reads/writes attributed to it. A memory access is "data" iff its address is OUTSIDE the
+ * executing instruction's own [pc, pc+len) byte range (so opcode/operand fetches are code,
+ * everything else -- RAM/ROM-table reads, stack push/pop, the `ret` fetch -- is data); IO
+ * is always data. This is what makes a path like 0x27a9 33bbfd2f legible: the literal
+ * branch/loop the route took is shown, not reconstructed from an unordered read list.
+ * @returns {{ok:true, steps:[{pc,m,len,reads,writes}], regs_out, returned}} | {ok:false, reason}
+ */
+export function explainRecord(romBytes, rec) {
+  const mem = new Uint8Array(0x10000);
+  mem.set(romBytes.subarray(ROM_LO1, ROM_HI1+1), ROM_LO1);
+  mem.set(romBytes.subarray(ROM_LO2, ROM_HI2+1), ROM_LO2);
+  for (let a=0x3800; a<=0x3fff; a++) mem[a] = 0xff;
+  const seeded = new Set();
+  const ioQ = new Map();
+  for (const [addr, val, type] of rec.reads) {
+    if (type === 'io') { const p = addr & 0xff; if (!ioQ.has(p)) ioQ.set(p, []); ioQ.get(p).push(val & 0xff); continue; }
+    const a = addr & 0xffff;
+    if (!seeded.has(a)) { mem[a] = val & 0xff; seeded.add(a); }
+  }
+  const dis = makeDis((a) => mem[a & 0xffff]);
+  let cur = null;                                              // the in-flight instruction's bucket
+  const inCode = (a) => cur && ((a - cur.pc) & 0xffff) < cur.len;
+  const ioCursor = new Map();
+  let ioStarved = false;
+  const cpu = new Z80CPU({
+    readByte: (a) => { a&=0xffff; if (cur && !inCode(a)) cur.reads.push([a, mem[a], 'mem']); return mem[a]; },
+    writeByte: (a, v) => { a&=0xffff; v&=0xff; if (cur) cur.writes.push([a, v, 'mem']); if (a >= 0x0800) mem[a] = v; },
+    readPort: (p) => { p&=0xff; const q=ioQ.get(p); const i=ioCursor.get(p)||0; if(!q||i>=q.length){ioStarved=true;return 0xff;} ioCursor.set(p,i+1); const v=q[i]; if (cur) cur.reads.push([p, v, 'io']); return v; },
+    writePort: (p, v) => { p&=0xff; v&=0xff; if (cur) cur.writes.push([p, v, 'io']); },
+  });
+  const entryPC = typeof rec.entry_pc === 'string' ? parseInt(rec.entry_pc, 16) : rec.entry_pc;
+  const st = stateFromRegs(rec.regs_in); st.pc = entryPC;
+  cpu.setState(st);
+  const entrySP = rec.regs_in.sp;
+  const steps = [];
+  let n = 0;
+  const MAX = 50000;
+  while (true) {
+    const s = cpu.getState();
+    if (s.sp > entrySP && n > 0) return { ok:true, steps, regs_out: regsFromState(s), returned:true };
+    const d = dis(s.pc);
+    cur = { pc: s.pc & 0xffff, m: d.m, len: d.len, reads: [], writes: [] };
+    steps.push(cur);
+    cpu.step();
+    if (++n > MAX) return { ok:false, reason:'no-return', steps };
+    if (ioStarved) return { ok:false, reason:'io-starved', steps };
+  }
+}
+
+function formatExplain(entryHex, pathId, res) {
+  const lines = [];
+  const ev = (e) => `${e[2]==='io'?'IO':'mem'}[${e[2]==='io'?'$'+e[0].toString(16).padStart(2,'0'):e[0].toString(16).padStart(4,'0')}]=$${(e[1]&0xff).toString(16).padStart(2,'0')}`;
+  lines.push(`--explain ${entryHex} ${pathId}  (${res.steps.length} instruction(s)${res.returned===false?', NOT returned: '+res.reason:''})`);
+  for (const s of res.steps) {
+    const acc = [...s.reads.map(r => 'R ' + ev(r)), ...s.writes.map(w => 'W ' + ev(w))];
+    lines.push(`  ${s.pc.toString(16).padStart(4,'0')}  ${s.m.padEnd(22)}${acc.length ? '  ' + acc.join('  ') : ''}`);
+  }
+  return lines.join('\n');
+}
+
 // data-only read list for the record (writable + IO, in capture order)
 function recordReads(inv) {
   const out = [];
@@ -162,9 +227,9 @@ function writesEqual(replayWs, captureWs) {
  * @param {(pc:number)=>string} [o.nameOf]  routine namer (T6.1); falls back to hex
  * @returns {{records:object[], stats:object}}
  */
-export function generateTestPlan({ romRead, scriptText, maxFrames, perRoutine = 8, nameOf }) {
+export function generateTestPlan({ romRead, scriptText, maxFrames, perRoutine = 8, nameOf, inclusive = false }) {
   const romBytes = buildRomImage(romRead);
-  const { invocations } = captureTrace({ romRead, scriptText, maxFrames });
+  const { invocations } = captureTrace({ romRead, scriptText, maxFrames, inclusive });
 
   // group by routine; within a routine keep one record per distinct PC-path, capped.
   const byRoutine = new Map();                                // entryPC -> Map(path_id -> record)
@@ -233,10 +298,43 @@ function loadLabels() {
     return (pc) => m.get(pc) || null;
   } catch { return null; }
 }
+// Locate a record by (entry_pc, path_id) across the frozen test-plan JSONLs.
+function findRecord(entryHex, pathId, planDir) {
+  for (const f of fs.readdirSync(planDir).filter(n => n.endsWith('.jsonl'))) {
+    for (const line of fs.readFileSync(path.join(planDir, f), 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line);
+      if (r.entry_pc === entryHex && r.path_id === pathId) return r;
+    }
+  }
+  return null;
+}
+
+function explainMain() {
+  // node generate_test_plan.js --explain <entry_pc> <path_id> [planDir]
+  const entryHex = process.argv[3], pathId = process.argv[4];
+  const planDir = process.argv[5] || path.resolve(fileURLToPath(import.meta.url), '../../../traces/test-plans');
+  if (!entryHex || !pathId) { console.error('Usage: node generate_test_plan.js --explain <entry_pc> <path_id> [planDir]'); process.exit(1); }
+  const romDir = process.env.BERZERK_ROM_DIR || '/Users/sudnya/checkout/smi/gfx-challenge/rom/berzerk';
+  for (const f of ROM_FILES) if (!fs.existsSync(path.join(romDir, f))) { console.error(`ROM ${f} not found in ${romDir}`); process.exit(1); }
+  const romBytes = buildRomImage((name) => new Uint8Array(fs.readFileSync(path.join(romDir, name))));
+  const rec = findRecord(entryHex.toLowerCase(), pathId, planDir);
+  if (!rec) { console.error(`no record ${entryHex} ${pathId} in ${planDir}`); process.exit(1); }
+  const res = explainRecord(romBytes, rec);
+  if (!res.ok && !res.steps) { console.error(`replay failed: ${res.reason}`); process.exit(1); }
+  console.log(formatExplain(entryHex, pathId, res));
+}
+
 function main() {
-  const [, , scriptPath, outPath, maxArg, perArg] = process.argv;
+  if (process.argv[2] === '--explain') return explainMain();
+  const inclusive = process.argv.includes('--inclusive');
+  const pos = process.argv.slice(2).filter(a => a !== '--inclusive');
+  const [scriptPath, outPath, maxArg, perArg] = pos;
   if (!scriptPath || !outPath) {
-    console.error('Usage: node generate_test_plan.js <input_script> <out.jsonl> [maxFrames] [perRoutine]');
+    console.error('Usage: node generate_test_plan.js <input_script> <out.jsonl> [maxFrames] [perRoutine] [--inclusive]');
+    console.error('   or: node generate_test_plan.js --explain <entry_pc> <path_id> [planDir]');
+    console.error('  --inclusive: fold ported/all callees into each parent record so non-leaf');
+    console.error('               composites self-validate hermetically (T9.2 Option 2).');
     process.exit(1);
   }
   const romDir = process.env.BERZERK_ROM_DIR || '/Users/sudnya/checkout/smi/gfx-challenge/rom/berzerk';
@@ -248,6 +346,7 @@ function main() {
     maxFrames: maxArg ? parseInt(maxArg,10) : undefined,
     perRoutine: perArg ? parseInt(perArg,10) : 8,
     nameOf: loadLabels(),
+    inclusive,
   });
   fs.writeFileSync(outPath, records.map(r => JSON.stringify(r)).join('\n') + '\n');
   console.error(`test plan: ${records.length} records over ${stats.routines_kept}/${stats.routines_total} routines -> ${outPath}`);

@@ -28,11 +28,24 @@ export class Z80CPU {
     this.core.reset();
   }
 
+  /** Install a port-dispatch hook: hook(pc, this) -> cycles to charge, or null to
+   *  fall through to the core. Used by T9.1 to run a registered JS port in place
+   *  of the Z80 routine at a CALL target. Pass null to uninstall. */
+  installPortHook(hook) {
+    this.portHook = hook;
+  }
+
   /** Execute one instruction (incl. prefixes/interrupt handling). Returns cycles. */
   step() {
     const pc = this.pc;
     if (this.sync_hook && pc === this.sync_hook) {
       this.sync_callback();
+    }
+    // Port-dispatch: if a JS port is registered at PC, run it in place of the
+    // Z80 routine and charge the displaced routine's cycle cost (T9.1).
+    if (this.portHook) {
+      const cycles = this.portHook(pc, this);
+      if (cycles !== null && cycles !== undefined) return cycles;
     }
     const opcode = this.callbacks.readByte(pc);
     if (this.trace_log) {
