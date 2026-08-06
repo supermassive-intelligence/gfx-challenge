@@ -1,0 +1,99 @@
+/**
+ * Thin, swappable adapter over the vendored Z80 core (DrGoldfire/Z80.js).
+ *
+ * The core itself is untouched logic (src/cpu/z80_core.js). This adapter is
+ * the ONLY machine-facing surface: it wires the machine's memory/IO callbacks
+ * to the core's required {mem_read, mem_write, io_read, io_write} object and
+ * exposes the per-instruction step + register access the rest of the machine
+ * and the validation tools rely on. Swapping cores means rewriting this file.
+ *
+ * Callbacks (constructor argument):
+ *   readByte(addr)        -> byte
+ *   writeByte(addr, val)
+ *   readPort(port)        -> byte
+ *   writePort(port, val)
+ */
+
+import { Z80 } from './z80_core.js';
+
+export class Z80CPU {
+  constructor(callbacks) {
+    this.callbacks = callbacks;
+    this.core = new Z80({
+      mem_read: (addr) => callbacks.readByte(addr & 0xffff) & 0xff,
+      mem_write: (addr, val) => callbacks.writeByte(addr & 0xffff, val & 0xff),
+      io_read: (port) => callbacks.readPort(port & 0xffff) & 0xff,
+      io_write: (port, val) => callbacks.writePort(port & 0xffff, val & 0xff),
+    });
+    this.core.reset();
+  }
+
+  /** Install a port-dispatch hook: hook(pc, this) -> cycles to charge, or null to
+   *  fall through to the core. Used by T9.1 to run a registered JS port in place
+   *  of the Z80 routine at a CALL target. Pass null to uninstall. */
+  installPortHook(hook) {
+    this.portHook = hook;
+  }
+
+  /** Execute one instruction (incl. prefixes/interrupt handling). Returns cycles. */
+  step() {
+    const pc = this.pc;
+    if (this.sync_hook && pc === this.sync_hook) {
+      this.sync_callback();
+    }
+    // Port-dispatch: if a JS port is registered at PC, run it in place of the
+    // Z80 routine and charge the displaced routine's cycle cost (T9.1).
+    if (this.portHook) {
+      const cycles = this.portHook(pc, this);
+      if (cycles !== null && cycles !== undefined) return cycles;
+    }
+    const opcode = this.callbacks.readByte(pc);
+    if (this.trace_log) {
+      this.trace_log.push(`${pc.toString(16).padStart(4, '0')}:${opcode.toString(16).padStart(2, '0')}`);
+    }
+    return this.core.run_instruction();
+  }
+
+  setSyncPoint(addr, callback) {
+    this.sync_hook = addr;
+    this.sync_callback = callback;
+  }
+
+  enableTrace() {
+    this.trace_log = [];
+  }
+
+  disableTrace() {
+    return this.trace_log;
+  }
+
+  reset() {
+    this.core.reset();
+  }
+
+  /** Raise an interrupt line. nonMaskable=true -> NMI; otherwise maskable IRQ with data bus byte. */
+  interrupt(nonMaskable, data) {
+    this.core.interrupt(nonMaskable, data);
+  }
+
+  /** Full core state passthrough (used by the SingleStepTests runner). */
+  getState() {
+    return this.core.getState();
+  }
+
+  setState(state) {
+    this.core.setState(state);
+  }
+
+  // --- Register convenience accessors (used by run_zex.js CP/M shim) ---
+  get pc() { return this.core.getState().pc; }
+  set pc(v) { const s = this.core.getState(); s.pc = v & 0xffff; this.core.setState(s); }
+
+  get sp() { return this.core.getState().sp; }
+  set sp(v) { const s = this.core.getState(); s.sp = v & 0xffff; this.core.setState(s); }
+
+  get c() { return this.core.getState().c; }
+  get e() { return this.core.getState().e; }
+  get d() { return this.core.getState().d; }
+  get de() { const s = this.core.getState(); return (s.d << 8) | s.e; }
+}

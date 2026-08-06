@@ -1,0 +1,17 @@
+# Machine .gitignore
+# ROMs and goldens
+fixtures/**/*.bin
+fixtures/**/*.jsonl
+
+# Large trace captures
+traces/*.bin
+traces/*.jsonl
+
+# Logs
+*.log
+
+# Speech/sound capture logs (large; regenerable via tools/mame/speechlog.lua) -- T2.8b
+speechlog.txt
+
+# Transparency tool un-hooked hash cache (regenerated on demand)
+.cache/

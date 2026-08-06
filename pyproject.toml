@@ -1,0 +1,24 @@
+[project]
+name = "traj-pipeline"
+version = "0.0.1"
+description = "Trajectory-to-training-data pipeline (spec: trajectory_pipeline_spec.md)"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.39.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["traj_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,0 +1,333 @@
+{"addr": 0, "bytes": [0], "expected": "nop", "len": 1, "label": "TODOs"}
+{"addr": 1, "bytes": [243], "expected": "di", "len": 1, "label": null}
+{"addr": 2, "bytes": [175], "expected": "xor a", "len": 1, "label": null}
+{"addr": 3, "bytes": [211, 77], "expected": "out ($4d),a", "len": 2, "label": null}
+{"addr": 5, "bytes": [237, 71], "expected": "ld i,a", "len": 2, "label": null}
+{"addr": 7, "bytes": [219, 97], "expected": "in a,($61)", "len": 2, "label": null}
+{"addr": 9, "bytes": [203, 71], "expected": "bit 0,a", "len": 2, "label": null}
+{"addr": 11, "bytes": [194, 0, 2], "expected": "jp nz,$0200", "len": 3, "label": null}
+{"addr": 25, "bytes": [24, 104], "expected": "jr $0083", "len": 2, "label": null}
+{"addr": 27, "bytes": [205, 123, 41], "expected": "call $297b", "len": 3, "label": null}
+{"addr": 57, "bytes": [201], "expected": "ret", "len": 1, "label": null}
+{"addr": 90, "bytes": [255], "expected": "rst $38", "len": 1, "label": null}
+{"addr": 104, "bytes": [245], "expected": "push af", "len": 1, "label": null}
+{"addr": 105, "bytes": [58, 0, 64], "expected": "ld a,($4000)", "len": 3, "label": null}
+{"addr": 108, "bytes": [183], "expected": "or a", "len": 1, "label": null}
+{"addr": 112, "bytes": [241], "expected": "pop af", "len": 1, "label": null}
+{"addr": 113, "bytes": [195, 33, 23], "expected": "jp $1721", "len": 3, "label": null}
+{"addr": 116, "bytes": [5], "expected": "dec b", "len": 1, "label": null}
+{"addr": 121, "bytes": [1, 0, 0], "expected": "ld bc,$0000", "len": 3, "label": null}
+{"addr": 124, "bytes": [13], "expected": "dec c", "len": 1, "label": null}
+{"addr": 125, "bytes": [32, 253], "expected": "jr nz,$007c", "len": 2, "label": null}
+{"addr": 127, "bytes": [16, 251], "expected": "djnz $007c", "len": 2, "label": null}
+{"addr": 131, "bytes": [62, 1], "expected": "ld a,$01", "len": 2, "label": null}
+{"addr": 136, "bytes": [17, 71, 130], "expected": "ld de,$8247", "len": 3, "label": null}
+{"addr": 139, "bytes": [237, 65], "expected": "out (c),b", "len": 2, "label": null}
+{"addr": 142, "bytes": [237, 81], "expected": "out (c),d", "len": 2, "label": null}
+{"addr": 144, "bytes": [12], "expected": "inc c", "len": 1, "label": null}
+{"addr": 154, "bytes": [237, 89], "expected": "out (c),e", "len": 2, "label": null}
+{"addr": 156, "bytes": [14, 81], "expected": "ld c,$51", "len": 2, "label": null}
+{"addr": 158, "bytes": [61], "expected": "dec a", "len": 1, "label": null}
+{"addr": 159, "bytes": [40, 234], "expected": "jr z,$008b", "len": 2, "label": null}
+{"addr": 176, "bytes": [221, 233], "expected": "jp (ix)", "len": 2, "label": null}
+{"addr": 261, "bytes": [33, 0, 0], "expected": "ld hl,$0000", "len": 3, "label": null}
+{"addr": 264, "bytes": [22, 8], "expected": "ld d,$08", "len": 2, "label": null}
+{"addr": 266, "bytes": [126], "expected": "ld a,(hl)", "len": 1, "label": null}
+{"addr": 267, "bytes": [9], "expected": "add hl,bc", "len": 1, "label": null}
+{"addr": 269, "bytes": [237, 79], "expected": "ld r,a", "len": 2, "label": null}
+{"addr": 271, "bytes": [50, 0, 16], "expected": "ld ($1000),a", "len": 3, "label": null}
+{"addr": 274, "bytes": [21], "expected": "dec d", "len": 1, "label": null}
+{"addr": 281, "bytes": [123], "expected": "ld a,e", "len": 1, "label": null}
+{"addr": 282, "bytes": [230, 32], "expected": "and $20", "len": 2, "label": null}
+{"addr": 284, "bytes": [71], "expected": "ld b,a", "len": 1, "label": null}
+{"addr": 285, "bytes": [237, 120], "expected": "in a,(c)", "len": 2, "label": null}
+{"addr": 287, "bytes": [203, 11], "expected": "rrc e", "len": 2, "label": null}
+{"addr": 298, "bytes": [237, 121], "expected": "out (c),a", "len": 2, "label": null}
+{"addr": 302, "bytes": [203, 15], "expected": "rrc a", "len": 2, "label": null}
+{"addr": 304, "bytes": [48, 248], "expected": "jr nc,$012a", "len": 2, "label": null}
+{"addr": 321, "bytes": [30, 6], "expected": "ld e,$06", "len": 2, "label": null}
+{"addr": 330, "bytes": [38, 0], "expected": "ld h,$00", "len": 2, "label": null}
+{"addr": 332, "bytes": [46, 255], "expected": "ld l,$ff", "len": 2, "label": null}
+{"addr": 334, "bytes": [221, 126, 0], "expected": "ld a,(ix+$00)", "len": 3, "label": null}
+{"addr": 337, "bytes": [87], "expected": "ld d,a", "len": 1, "label": null}
+{"addr": 338, "bytes": [165], "expected": "and l", "len": 1, "label": null}
+{"addr": 339, "bytes": [111], "expected": "ld l,a", "len": 1, "label": null}
+{"addr": 340, "bytes": [122], "expected": "ld a,d", "len": 1, "label": null}
+{"addr": 341, "bytes": [132], "expected": "add a,h", "len": 1, "label": null}
+{"addr": 342, "bytes": [103], "expected": "ld h,a", "len": 1, "label": null}
+{"addr": 343, "bytes": [221, 35], "expected": "inc ix", "len": 2, "label": null}
+{"addr": 353, "bytes": [254, 255], "expected": "cp $ff", "len": 2, "label": null}
+{"addr": 357, "bytes": [131], "expected": "add a,e", "len": 1, "label": null}
+{"addr": 358, "bytes": [214, 7], "expected": "sub $07", "len": 2, "label": null}
+{"addr": 360, "bytes": [242, 111, 1], "expected": "jp p,$016f", "len": 3, "label": null}
+{"addr": 363, "bytes": [125], "expected": "ld a,l", "len": 1, "label": null}
+{"addr": 364, "bytes": [60], "expected": "inc a", "len": 1, "label": null}
+{"addr": 369, "bytes": [188], "expected": "cp h", "len": 1, "label": null}
+{"addr": 373, "bytes": [203, 7], "expected": "rlc a", "len": 2, "label": null}
+{"addr": 375, "bytes": [218, 146, 1], "expected": "jp c,$0192", "len": 3, "label": null}
+{"addr": 378, "bytes": [29], "expected": "dec e", "len": 1, "label": null}
+{"addr": 381, "bytes": [237, 87], "expected": "ld a,i", "len": 2, "label": null}
+{"addr": 383, "bytes": [167], "expected": "and a", "len": 1, "label": null}
+{"addr": 409, "bytes": [42, 117, 0], "expected": "ld hl,($0075)", "len": 3, "label": null}
+{"addr": 416, "bytes": [54, 85], "expected": "ld (hl),$55", "len": 2, "label": null}
+{"addr": 418, "bytes": [43], "expected": "dec hl", "len": 1, "label": null}
+{"addr": 419, "bytes": [237, 161], "expected": "cpi", "len": 2, "label": null}
+{"addr": 421, "bytes": [226, 171, 1], "expected": "jp po,$01ab", "len": 3, "label": null}
+{"addr": 424, "bytes": [35], "expected": "inc hl", "len": 1, "label": null}
+{"addr": 429, "bytes": [49, 255, 255], "expected": "ld sp,$ffff", "len": 3, "label": null}
+{"addr": 437, "bytes": [47], "expected": "cpl", "len": 1, "label": null}
+{"addr": 438, "bytes": [174], "expected": "xor (hl)", "len": 1, "label": null}
+{"addr": 441, "bytes": [114], "expected": "ld (hl),d", "len": 1, "label": null}
+{"addr": 445, "bytes": [234, 204, 1], "expected": "jp pe,$01cc", "len": 3, "label": null}
+{"addr": 460, "bytes": [57], "expected": "add hl,sp", "len": 1, "label": null}
+{"addr": 468, "bytes": [56, 1], "expected": "jr c,$01d7", "len": 2, "label": null}
+{"addr": 470, "bytes": [118], "expected": "halt", "len": 1, "label": null}
+{"addr": 476, "bytes": [202, 2, 1], "expected": "jp z,$0102", "len": 3, "label": null}
+{"addr": 496, "bytes": [210, 177, 2], "expected": "jp nc,$02b1", "len": 3, "label": null}
+{"addr": 555, "bytes": [6, 16], "expected": "ld b,$10", "len": 2, "label": null}
+{"addr": 557, "bytes": [120], "expected": "ld a,b", "len": 1, "label": null}
+{"addr": 563, "bytes": [119], "expected": "ld (hl),a", "len": 1, "label": null}
+{"addr": 564, "bytes": [18], "expected": "ld (de),a", "len": 1, "label": null}
+{"addr": 565, "bytes": [78], "expected": "ld c,(hl)", "len": 1, "label": null}
+{"addr": 585, "bytes": [19], "expected": "inc de", "len": 1, "label": null}
+{"addr": 598, "bytes": [37], "expected": "dec h", "len": 1, "label": null}
+{"addr": 601, "bytes": [36], "expected": "inc h", "len": 1, "label": null}
+{"addr": 602, "bytes": [55], "expected": "scf", "len": 1, "label": null}
+{"addr": 603, "bytes": [203, 21], "expected": "rl l", "len": 2, "label": null}
+{"addr": 605, "bytes": [203, 20], "expected": "rl h", "len": 2, "label": null}
+{"addr": 607, "bytes": [25], "expected": "add hl,de", "len": 1, "label": null}
+{"addr": 625, "bytes": [229], "expected": "push hl", "len": 1, "label": null}
+{"addr": 633, "bytes": [59], "expected": "dec sp", "len": 1, "label": null}
+{"addr": 669, "bytes": [121], "expected": "ld a,c", "len": 1, "label": null}
+{"addr": 670, "bytes": [112], "expected": "ld (hl),b", "len": 1, "label": null}
+{"addr": 672, "bytes": [72], "expected": "ld c,b", "len": 1, "label": null}
+{"addr": 674, "bytes": [70], "expected": "ld b,(hl)", "len": 1, "label": null}
+{"addr": 676, "bytes": [177], "expected": "or c", "len": 1, "label": null}
+{"addr": 775, "bytes": [176], "expected": "or b", "len": 1, "label": null}
+{"addr": 890, "bytes": [170], "expected": "xor d", "len": 1, "label": null}
+{"addr": 898, "bytes": [79], "expected": "ld c,a", "len": 1, "label": null}
+{"addr": 911, "bytes": [217], "expected": "exx", "len": 1, "label": null}
+{"addr": 926, "bytes": [115], "expected": "ld (hl),e", "len": 1, "label": null}
+{"addr": 928, "bytes": [171], "expected": "xor e", "len": 1, "label": null}
+{"addr": 931, "bytes": [203, 67], "expected": "bit 0,e", "len": 2, "label": null}
+{"addr": 940, "bytes": [65], "expected": "ld b,c", "len": 1, "label": null}
+{"addr": 968, "bytes": [162], "expected": "and d", "len": 1, "label": null}
+{"addr": 973, "bytes": [163], "expected": "and e", "len": 1, "label": null}
+{"addr": 977, "bytes": [235], "expected": "ex de,hl", "len": 1, "label": null}
+{"addr": 978, "bytes": [41], "expected": "add hl,hl", "len": 1, "label": null}
+{"addr": 987, "bytes": [253, 126, 0], "expected": "ld a,(iy+$00)", "len": 3, "label": null}
+{"addr": 1000, "bytes": [8], "expected": "ex af,af'", "len": 1, "label": null}
+{"addr": 1058, "bytes": [141], "expected": "adc a,l", "len": 1, "label": null}
+{"addr": 1059, "bytes": [80], "expected": "ld d,b", "len": 1, "label": null}
+{"addr": 1060, "bytes": [77], "expected": "ld c,l", "len": 1, "label": null}
+{"addr": 1061, "bytes": [74], "expected": "ld c,d", "len": 1, "label": null}
+{"addr": 1063, "bytes": [68], "expected": "ld b,h", "len": 1, "label": null}
+{"addr": 1068, "bytes": [85], "expected": "ld d,l", "len": 1, "label": null}
+{"addr": 1070, "bytes": [149], "expected": "sub l", "len": 1, "label": null}
+{"addr": 1072, "bytes": [213], "expected": "push de", "len": 1, "label": null}
+{"addr": 1073, "bytes": [86], "expected": "ld d,(hl)", "len": 1, "label": null}
+{"addr": 1074, "bytes": [137], "expected": "adc a,c", "len": 1, "label": null}
+{"addr": 1076, "bytes": [73], "expected": "ld c,c", "len": 1, "label": null}
+{"addr": 1086, "bytes": [145], "expected": "sub c", "len": 1, "label": null}
+{"addr": 1088, "bytes": [209], "expected": "pop de", "len": 1, "label": null}
+{"addr": 1095, "bytes": [66], "expected": "ld b,d", "len": 1, "label": null}
+{"addr": 1098, "bytes": [95], "expected": "ld e,a", "len": 1, "label": null}
+{"addr": 1111, "bytes": [187], "expected": "cp e", "len": 1, "label": null}
+{"addr": 1123, "bytes": [203, 18], "expected": "rl d", "len": 2, "label": null}
+{"addr": 1135, "bytes": [203, 31], "expected": "rr a", "len": 2, "label": null}
+{"addr": 1137, "bytes": [203, 24], "expected": "rr b", "len": 2, "label": null}
+{"addr": 1139, "bytes": [203, 25], "expected": "rr c", "len": 2, "label": null}
+{"addr": 1141, "bytes": [89], "expected": "ld e,c", "len": 1, "label": null}
+{"addr": 1150, "bytes": [203, 8], "expected": "rrc b", "len": 2, "label": null}
+{"addr": 1152, "bytes": [203, 19], "expected": "rl e", "len": 2, "label": null}
+{"addr": 1178, "bytes": [113], "expected": "ld (hl),c", "len": 1, "label": null}
+{"addr": 1187, "bytes": [161], "expected": "and c", "len": 1, "label": null}
+{"addr": 1196, "bytes": [23], "expected": "rla", "len": 1, "label": null}
+{"addr": 1199, "bytes": [203, 0], "expected": "rlc b", "len": 2, "label": null}
+{"addr": 1203, "bytes": [203, 1], "expected": "rlc c", "len": 2, "label": null}
+{"addr": 1238, "bytes": [160], "expected": "and b", "len": 1, "label": null}
+{"addr": 1244, "bytes": [168], "expected": "xor b", "len": 1, "label": null}
+{"addr": 1274, "bytes": [237, 94], "expected": "im 2", "len": 2, "label": null}
+{"addr": 1294, "bytes": [31], "expected": "rra", "len": 1, "label": null}
+{"addr": 1295, "bytes": [203, 16], "expected": "rl b", "len": 2, "label": null}
+{"addr": 1298, "bytes": [238, 85], "expected": "xor $55", "len": 2, "label": null}
+{"addr": 1302, "bytes": [251], "expected": "ei", "len": 1, "label": null}
+{"addr": 1444, "bytes": [197], "expected": "push bc", "len": 1, "label": null}
+{"addr": 1448, "bytes": [193], "expected": "pop bc", "len": 1, "label": null}
+{"addr": 1551, "bytes": [203, 127], "expected": "bit 7,a", "len": 2, "label": null}
+{"addr": 1585, "bytes": [94], "expected": "ld e,(hl)", "len": 1, "label": null}
+{"addr": 1608, "bytes": [225], "expected": "pop hl", "len": 1, "label": null}
+{"addr": 1612, "bytes": [227], "expected": "ex (sp),hl", "len": 1, "label": null}
+{"addr": 1621, "bytes": [203, 103], "expected": "bit 4,a", "len": 2, "label": null}
+{"addr": 1654, "bytes": [26], "expected": "ld a,(de)", "len": 1, "label": null}
+{"addr": 1661, "bytes": [7], "expected": "rlca", "len": 1, "label": null}
+{"addr": 1680, "bytes": [83], "expected": "ld d,e", "len": 1, "label": null}
+{"addr": 1702, "bytes": [237, 176], "expected": "ldir", "len": 2, "label": null}
+{"addr": 1853, "bytes": [84], "expected": "ld d,h", "len": 1, "label": null}
+{"addr": 1854, "bytes": [93], "expected": "ld e,l", "len": 1, "label": null}
+{"addr": 4518, "bytes": [3], "expected": "inc bc", "len": 1, "label": null}
+{"addr": 4519, "bytes": [192], "expected": "ret nz", "len": 1, "label": null}
+{"addr": 4521, "bytes": [224], "expected": "ret po", "len": 1, "label": null}
+{"addr": 4522, "bytes": [15], "expected": "rrca", "len": 1, "label": null}
+{"addr": 4523, "bytes": [240], "expected": "ret p", "len": 1, "label": null}
+{"addr": 4525, "bytes": [200], "expected": "ret z", "len": 1, "label": null}
+{"addr": 4526, "bytes": [34, 196, 3], "expected": "ld ($03c4),hl", "len": 3, "label": null}
+{"addr": 4529, "bytes": [64], "expected": "ld b,b", "len": 1, "label": null}
+{"addr": 4532, "bytes": [2], "expected": "ld (bc),a", "len": 1, "label": null}
+{"addr": 4570, "bytes": [4], "expected": "inc b", "len": 1, "label": null}
+{"addr": 4610, "bytes": [128], "expected": "add a,b", "len": 1, "label": null}
+{"addr": 4622, "bytes": [52], "expected": "inc (hl)", "len": 1, "label": null}
+{"addr": 4626, "bytes": [67], "expected": "ld b,e", "len": 1, "label": null}
+{"addr": 4628, "bytes": [76], "expected": "ld c,h", "len": 1, "label": null}
+{"addr": 4634, "bytes": [109], "expected": "ld l,l", "len": 1, "label": null}
+{"addr": 4638, "bytes": [133], "expected": "add a,l", "len": 1, "label": null}
+{"addr": 4642, "bytes": [157], "expected": "sbc a,l", "len": 1, "label": null}
+{"addr": 4680, "bytes": [124], "expected": "ld a,h", "len": 1, "label": null}
+{"addr": 4717, "bytes": [130], "expected": "add a,d", "len": 1, "label": null}
+{"addr": 4726, "bytes": [189], "expected": "cp l", "len": 1, "label": null}
+{"addr": 4729, "bytes": [129], "expected": "add a,c", "len": 1, "label": null}
+{"addr": 4794, "bytes": [246, 0], "expected": "or $00", "len": 2, "label": null}
+{"addr": 5015, "bytes": [90], "expected": "ld e,d", "len": 1, "label": null}
+{"addr": 5016, "bytes": [153], "expected": "sbc a,c", "len": 1, "label": null}
+{"addr": 5017, "bytes": [154], "expected": "sbc a,d", "len": 1, "label": null}
+{"addr": 5067, "bytes": [117], "expected": "ld (hl),l", "len": 1, "label": null}
+{"addr": 5068, "bytes": [116], "expected": "ld (hl),h", "len": 1, "label": null}
+{"addr": 5070, "bytes": [110], "expected": "ld l,(hl)", "len": 1, "label": null}
+{"addr": 5074, "bytes": [97], "expected": "ld h,c", "len": 1, "label": null}
+{"addr": 5236, "bytes": [253, 102, 7], "expected": "ld h,(iy+$07)", "len": 3, "label": null}
+{"addr": 5239, "bytes": [253, 110, 9], "expected": "ld l,(iy+$09)", "len": 3, "label": null}
+{"addr": 5246, "bytes": [221, 102, 7], "expected": "ld h,(ix+$07)", "len": 3, "label": null}
+{"addr": 5249, "bytes": [221, 110, 9], "expected": "ld l,(ix+$09)", "len": 3, "label": null}
+{"addr": 5252, "bytes": [45], "expected": "dec l", "len": 1, "label": null}
+{"addr": 5276, "bytes": [198, 16], "expected": "add a,$10", "len": 2, "label": null}
+{"addr": 5307, "bytes": [203, 92], "expected": "bit 3,h", "len": 2, "label": null}
+{"addr": 5315, "bytes": [181], "expected": "or l", "len": 1, "label": null}
+{"addr": 5317, "bytes": [203, 84], "expected": "bit 2,h", "len": 2, "label": null}
+{"addr": 5322, "bytes": [179], "expected": "or e", "len": 1, "label": null}
+{"addr": 5327, "bytes": [203, 76], "expected": "bit 1,h", "len": 2, "label": null}
+{"addr": 5337, "bytes": [203, 68], "expected": "bit 0,h", "len": 2, "label": null}
+{"addr": 5342, "bytes": [178], "expected": "or d", "len": 1, "label": null}
+{"addr": 5348, "bytes": [164], "expected": "and h", "len": 1, "label": null}
+{"addr": 5386, "bytes": [253, 229], "expected": "push iy", "len": 2, "label": null}
+{"addr": 5391, "bytes": [253, 225], "expected": "pop iy", "len": 2, "label": null}
+{"addr": 5397, "bytes": [253, 25], "expected": "add iy,de", "len": 2, "label": null}
+{"addr": 5408, "bytes": [253, 52, 1], "expected": "inc (iy+$01)", "len": 3, "label": null}
+{"addr": 5414, "bytes": [220, 160, 21], "expected": "call c,$15a0", "len": 3, "label": null}
+{"addr": 5423, "bytes": [253, 9], "expected": "add iy,bc", "len": 2, "label": null}
+{"addr": 5425, "bytes": [253, 53, 1], "expected": "dec (iy+$01)", "len": 3, "label": null}
+{"addr": 5433, "bytes": [253, 182, 253], "expected": "or (iy-$03)", "len": 3, "label": null}
+{"addr": 5505, "bytes": [253, 70, 0], "expected": "ld b,(iy+$00)", "len": 3, "label": null}
+{"addr": 5523, "bytes": [253, 112, 0], "expected": "ld (iy+$00),b", "len": 3, "label": null}
+{"addr": 5556, "bytes": [221, 225], "expected": "pop ix", "len": 2, "label": null}
+{"addr": 5571, "bytes": [185], "expected": "cp c", "len": 1, "label": null}
+{"addr": 5575, "bytes": [184], "expected": "cp b", "len": 1, "label": null}
+{"addr": 5597, "bytes": [28], "expected": "inc e", "len": 1, "label": null}
+{"addr": 5601, "bytes": [221, 150, 9], "expected": "sub (ix+$09)", "len": 3, "label": null}
+{"addr": 5605, "bytes": [248], "expected": "ret m", "len": 1, "label": null}
+{"addr": 5607, "bytes": [208], "expected": "ret nc", "len": 1, "label": null}
+{"addr": 5615, "bytes": [203, 34], "expected": "sla d", "len": 2, "label": null}
+{"addr": 5621, "bytes": [20], "expected": "inc d", "len": 1, "label": null}
+{"addr": 5622, "bytes": [186], "expected": "cp d", "len": 1, "label": null}
+{"addr": 5640, "bytes": [203, 79], "expected": "bit 1,a", "len": 2, "label": null}
+{"addr": 5764, "bytes": [233], "expected": "jp (hl)", "len": 1, "label": null}
+{"addr": 5849, "bytes": [10], "expected": "ld a,(bc)", "len": 1, "label": null}
+{"addr": 5850, "bytes": [143], "expected": "adc a,a", "len": 1, "label": null}
+{"addr": 5858, "bytes": [159], "expected": "sbc a,a", "len": 1, "label": null}
+{"addr": 5871, "bytes": [191], "expected": "cp a", "len": 1, "label": null}
+{"addr": 5897, "bytes": [182], "expected": "or (hl)", "len": 1, "label": null}
+{"addr": 5932, "bytes": [221, 229], "expected": "push ix", "len": 2, "label": null}
+{"addr": 5945, "bytes": [204, 18, 29], "expected": "call z,$1d12", "len": 3, "label": null}
+{"addr": 5980, "bytes": [203, 119], "expected": "bit 6,a", "len": 2, "label": null}
+{"addr": 6004, "bytes": [237, 69], "expected": "retn", "len": 2, "label": null}
+{"addr": 6017, "bytes": [203, 128], "expected": "res 0,b", "len": 2, "label": null}
+{"addr": 6019, "bytes": [203, 194], "expected": "set 0,d", "len": 2, "label": null}
+{"addr": 6027, "bytes": [203, 130], "expected": "res 0,d", "len": 2, "label": null}
+{"addr": 6040, "bytes": [81], "expected": "ld d,c", "len": 1, "label": null}
+{"addr": 6197, "bytes": [53], "expected": "dec (hl)", "len": 1, "label": null}
+{"addr": 6277, "bytes": [96], "expected": "ld h,b", "len": 1, "label": null}
+{"addr": 6292, "bytes": [203, 206], "expected": "set 1,(hl)", "len": 2, "label": null}
+{"addr": 6315, "bytes": [203, 78], "expected": "bit 1,(hl)", "len": 2, "label": null}
+{"addr": 6326, "bytes": [203, 77], "expected": "bit 1,l", "len": 2, "label": null}
+{"addr": 6390, "bytes": [39], "expected": "daa", "len": 1, "label": null}
+{"addr": 6416, "bytes": [135], "expected": "add a,a", "len": 1, "label": null}
+{"addr": 6447, "bytes": [203, 26], "expected": "rr d", "len": 2, "label": null}
+{"addr": 6458, "bytes": [203, 66], "expected": "bit 0,d", "len": 2, "label": null}
+{"addr": 6501, "bytes": [102], "expected": "ld h,(hl)", "len": 1, "label": null}
+{"addr": 6546, "bytes": [196, 205, 24], "expected": "call nz,$18cd", "len": 3, "label": null}
+{"addr": 6624, "bytes": [27], "expected": "dec de", "len": 1, "label": null}
+{"addr": 6629, "bytes": [69], "expected": "ld b,l", "len": 1, "label": null}
+{"addr": 7475, "bytes": [92], "expected": "ld e,h", "len": 1, "label": null}
+{"addr": 7479, "bytes": [104], "expected": "ld l,b", "len": 1, "label": null}
+{"addr": 7485, "bytes": [138], "expected": "adc a,d", "len": 1, "label": null}
+{"addr": 7487, "bytes": [150], "expected": "sub (hl)", "len": 1, "label": null}
+{"addr": 7495, "bytes": [203, 29], "expected": "rr l", "len": 2, "label": null}
+{"addr": 7497, "bytes": [228, 29, 244], "expected": "call po,$f41d", "len": 3, "label": null}
+{"addr": 7661, "bytes": [203, 46], "expected": "sra (hl)", "len": 2, "label": null}
+{"addr": 7681, "bytes": [203, 30], "expected": "rr (hl)", "len": 2, "label": null}
+{"addr": 7753, "bytes": [253, 114, 255], "expected": "ld (iy-$01),d", "len": 3, "label": null}
+{"addr": 7756, "bytes": [253, 115, 254], "expected": "ld (iy-$02),e", "len": 3, "label": null}
+{"addr": 7778, "bytes": [249], "expected": "ld sp,hl", "len": 1, "label": null}
+{"addr": 7787, "bytes": [253, 233], "expected": "jp (iy)", "len": 2, "label": null}
+{"addr": 7793, "bytes": [253, 119, 1], "expected": "ld (iy+$01),a", "len": 3, "label": "ACTIVATE_HEAD_JOB"}
+{"addr": 7811, "bytes": [253, 117, 2], "expected": "ld (iy+$02),l", "len": 3, "label": null}
+{"addr": 7814, "bytes": [253, 116, 3], "expected": "ld (iy+$03),h", "len": 3, "label": null}
+{"addr": 7832, "bytes": [203, 70], "expected": "bit 0,(hl)", "len": 2, "label": null}
+{"addr": 7897, "bytes": [203, 191], "expected": "res 7,a", "len": 2, "label": null}
+{"addr": 7998, "bytes": [221, 119, 10], "expected": "ld (ix+$0a),a", "len": 3, "label": null}
+{"addr": 8098, "bytes": [221, 116, 11], "expected": "ld (ix+$0b),h", "len": 3, "label": null}
+{"addr": 8162, "bytes": [221, 57], "expected": "add ix,sp", "len": 2, "label": null}
+{"addr": 8186, "bytes": [221, 117, 7], "expected": "ld (ix+$07),l", "len": 3, "label": null}
+{"addr": 8246, "bytes": [221, 114, 255], "expected": "ld (ix-$01),d", "len": 3, "label": null}
+{"addr": 8249, "bytes": [221, 115, 254], "expected": "ld (ix-$02),e", "len": 3, "label": null}
+{"addr": 8376, "bytes": [221, 113, 0], "expected": "ld (ix+$00),c", "len": 3, "label": null}
+{"addr": 8392, "bytes": [169], "expected": "xor c", "len": 1, "label": null}
+{"addr": 8776, "bytes": [237, 184], "expected": "lddr", "len": 2, "label": null}
+{"addr": 9038, "bytes": [203, 56], "expected": "srl b", "len": 2, "label": null}
+{"addr": 9049, "bytes": [203, 33], "expected": "sla c", "len": 2, "label": null}
+{"addr": 9058, "bytes": [134], "expected": "add a,(hl)", "len": 1, "label": null}
+{"addr": 9114, "bytes": [216], "expected": "ret c", "len": 1, "label": null}
+{"addr": 9118, "bytes": [203, 198], "expected": "set 0,(hl)", "len": 2, "label": null}
+{"addr": 9128, "bytes": [206, 12], "expected": "adc a,$0c", "len": 2, "label": null}
+{"addr": 9134, "bytes": [158], "expected": "sbc a,(hl)", "len": 1, "label": null}
+{"addr": 9456, "bytes": [203, 134], "expected": "res 0,(hl)", "len": 2, "label": null}
+{"addr": 10064, "bytes": [203, 142], "expected": "res 1,(hl)", "len": 2, "label": null}
+{"addr": 10113, "bytes": [237, 66], "expected": "sbc hl,bc", "len": 2, "label": null}
+{"addr": 10146, "bytes": [203, 254], "expected": "set 7,(hl)", "len": 2, "label": null}
+{"addr": 10156, "bytes": [203, 86], "expected": "bit 2,(hl)", "len": 2, "label": null}
+{"addr": 10425, "bytes": [203, 65], "expected": "bit 0,c", "len": 2, "label": null}
+{"addr": 10429, "bytes": [237, 68], "expected": "neg", "len": 2, "label": null}
+{"addr": 10433, "bytes": [203, 81], "expected": "bit 2,c", "len": 2, "label": null}
+{"addr": 10440, "bytes": [146], "expected": "sub d", "len": 1, "label": null}
+{"addr": 10479, "bytes": [221, 112, 6], "expected": "ld (ix+$06),b", "len": 3, "label": null}
+{"addr": 10632, "bytes": [203, 185], "expected": "res 7,c", "len": 2, "label": null}
+{"addr": 10671, "bytes": [203, 60], "expected": "srl h", "len": 2, "label": null}
+{"addr": 10690, "bytes": [203, 223], "expected": "set 3,a", "len": 2, "label": null}
+{"addr": 10826, "bytes": [203, 129], "expected": "res 0,c", "len": 2, "label": "SHOWO"}
+{"addr": 10832, "bytes": [203, 193], "expected": "set 0,c", "len": 2, "label": null}
+{"addr": 10835, "bytes": [203, 64], "expected": "bit 0,b", "len": 2, "label": null}
+{"addr": 10839, "bytes": [203, 63], "expected": "srl a", "len": 2, "label": null}
+{"addr": 11126, "bytes": [144], "expected": "sub b", "len": 1, "label": null}
+{"addr": 11127, "bytes": [250, 124, 43], "expected": "jp m,$2b7c", "len": 3, "label": null}
+{"addr": 11153, "bytes": [203, 120], "expected": "bit 7,b", "len": 2, "label": null}
+{"addr": 11399, "bytes": [190], "expected": "cp (hl)", "len": 1, "label": null}
+{"addr": 11487, "bytes": [147], "expected": "sub e", "len": 1, "label": null}
+{"addr": 11500, "bytes": [98], "expected": "ld h,d", "len": 1, "label": null}
+{"addr": 11705, "bytes": [88], "expected": "ld e,b", "len": 1, "label": null}
+{"addr": 12380, "bytes": [127], "expected": "ld a,a", "len": 1, "label": null}
+{"addr": 13306, "bytes": [11], "expected": "dec bc", "len": 1, "label": null}
+{"addr": 13319, "bytes": [236, 7, 50], "expected": "call pe,$3207", "len": 3, "label": null}
+{"addr": 13328, "bytes": [223], "expected": "rst $18", "len": 1, "label": null}
+{"addr": 13411, "bytes": [172], "expected": "xor h", "len": 1, "label": null}
+{"addr": 13441, "bytes": [252, 123, 8], "expected": "call m,$087b", "len": 3, "label": null}
+{"addr": 13932, "bytes": [237, 82], "expected": "sbc hl,de", "len": 2, "label": null}
+{"addr": 14018, "bytes": [180], "expected": "or h", "len": 1, "label": null}
+{"addr": 14105, "bytes": [203, 94], "expected": "bit 3,(hl)", "len": 2, "label": "UNCOLOUR_MAN"}
+{"addr": 14110, "bytes": [203, 158], "expected": "res 3,(hl)", "len": 2, "label": null}
+{"addr": 14140, "bytes": [203, 102], "expected": "bit 4,(hl)", "len": 2, "label": "COLOUR_MAN"}
+{"addr": 14143, "bytes": [203, 222], "expected": "set 3,(hl)", "len": 2, "label": null}
+{"addr": 14175, "bytes": [107], "expected": "ld l,e", "len": 1, "label": null}
+{"addr": 14214, "bytes": [253, 35], "expected": "inc iy", "len": 2, "label": null}
+{"addr": 14232, "bytes": [51], "expected": "inc sp", "len": 1, "label": null}
+{"addr": 14304, "bytes": [148], "expected": "sub h", "len": 1, "label": null}
+{"addr": 14307, "bytes": [173], "expected": "xor l", "len": 1, "label": null}
+{"addr": 14322, "bytes": [207], "expected": "rst $08", "len": 1, "label": null}

@@ -1,0 +1,12 @@
+{
+  "name": "berzerk-machine",
+  "version": "0.1.0",
+  "description": "JS machine for Stern Berzerk arcade port",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "replay": "node tools/replay_hash.js",
+    "diffhash": "node tools/diff_hashes.js",
+    "golden": "node tools/golden.js"
+  }
+}

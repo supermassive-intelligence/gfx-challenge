@@ -1,0 +1,6 @@
+# Sample audio is user-sourced and never committed (T2.8 HUMAN-GATE).
+# The manifest (event -> filename map) and docs ARE committed.
+*
+!.gitignore
+!README.md
+!manifest.json

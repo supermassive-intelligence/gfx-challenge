@@ -1,0 +1,150 @@
+<svg width="820" height="1008" viewBox="0 0 820 1008" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+<title>Z80 arcade ROM to JavaScript port — 10-phase pipeline (reconciled with task state, 2026-06-17)</title>
+<desc>Ten phases in four bands (Build and prove, Understand, Port, Finish). Each row shows the phase and the ability it unlocks, a blue IN chip (what it needs), a green OUT chip (what it produces), and an amber pill naming the independent reference it is proven against. Two trust gates (boot-window equivalence at Phase 3; gameplay equivalence at the Phase 8 bench). A YOU ARE HERE marker sits at end of Phase 4.</desc>
+<defs>
+<style>
+.t1{fill:#18181b;} .t2{fill:#6b7280;} .t3{fill:#9ca3af;}
+.row{fill:#f7f8fc;stroke:#dfe3ee;stroke-width:1;}
+.now{fill:#fff7e6;stroke:#e0a93a;stroke-width:2;}
+.inb{fill:#e9f0fc;stroke:#b3c8ec;stroke-width:1;}
+.outb{fill:#e8f4ec;stroke:#aed4b9;stroke-width:1;}
+.inl{fill:#2c4a87;font-weight:700;} .outl{fill:#2f6b40;font-weight:700;}
+.pill{fill:#fdf0db;stroke:#eab94e;stroke-width:1.2;}
+.gate{fill:#fadfb4;stroke:#d9982a;stroke-width:1.8;}
+.num{fill:#c7d2fe;} .numt{fill:#1e293b;font-weight:700;}
+.rule{stroke:#e5e7eb;stroke-width:1;}
+</style>
+</defs>
+<rect x="0" y="0" width="820" height="1008" fill="#ffffff"/>
+
+<text x="40" y="30" class="t1" font-size="20" font-weight="700">Z80 Arcade ROM &#8594; JavaScript Port</text>
+<text x="40" y="50" class="t2" font-size="12">Ten phases. Each step is proven against an independent reference before the next one leans on it.</text>
+
+<text x="96" y="72" class="t3" font-size="9" letter-spacing=".6">PHASE &amp; ABILITY UNLOCKED</text>
+<rect x="372" y="64" width="13" height="10" rx="2" class="inb"/><text x="390" y="72" class="t3" font-size="9" letter-spacing=".4">IN (needs)</text>
+<rect x="478" y="64" width="13" height="10" rx="2" class="outb"/><text x="496" y="72" class="t3" font-size="9" letter-spacing=".4">OUT (produces)</text>
+<text x="660" y="72" class="t3" font-size="9" letter-spacing=".6">PROVEN BY</text>
+
+<!-- ===== BAND A ===== -->
+<text x="40" y="94" class="t1" font-size="12" font-weight="700">&#9312; BUILD &amp; PROVE</text>
+<text x="780" y="94" class="t2" font-size="9.5" text-anchor="end">runtime: emulator (original ROM on a borrowed Z80 core)</text>
+<line x1="40" y1="100" x2="780" y2="100" class="rule"/>
+
+<!-- P1 -->
+<rect x="54" y="106" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="135" r="13" class="num"/><text x="74" y="139" class="numt" font-size="12" text-anchor="middle">1</text>
+<text x="96" y="131" class="t1" font-size="12.5" font-weight="700">Disassemble the ROM</text>
+<text x="96" y="149" class="t2" font-size="9.3" font-style="italic">ability: read the ROM as code, gaps known</text>
+<rect x="372" y="111" width="216" height="23" rx="6" class="inb"/><text x="380" y="126" font-size="8.5" class="inl">IN</text><text x="398" y="126" font-size="9" class="t1">ROM bytes</text>
+<rect x="372" y="136" width="216" height="23" rx="6" class="outb"/><text x="380" y="151" font-size="8.5" class="outl">OUT</text><text x="402" y="151" font-size="9" class="t1">code map + coverage report</text>
+<rect x="600" y="119" width="172" height="32" rx="7" class="pill"/><text x="686" y="139" class="t1" font-size="10" font-weight="600" text-anchor="middle">SkoolKit cross-check</text>
+
+<!-- P2 -->
+<rect x="54" y="172" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="201" r="13" class="num"/><text x="74" y="205" class="numt" font-size="12" text-anchor="middle">2</text>
+<text x="96" y="197" class="t1" font-size="12.5" font-weight="700">Build the JS machine</text>
+<text x="96" y="215" class="t2" font-size="9.3" font-style="italic">ability: play the ROM in JS (emulator)</text>
+<rect x="372" y="177" width="216" height="23" rx="6" class="inb"/><text x="380" y="192" font-size="8.5" class="inl">IN</text><text x="398" y="192" font-size="9" class="t1">MAME driver spec + Z80 core</text>
+<rect x="372" y="202" width="216" height="23" rx="6" class="outb"/><text x="380" y="217" font-size="8.5" class="outl">OUT</text><text x="402" y="217" font-size="9" class="t1">working emulator + shell</text>
+<rect x="600" y="185" width="172" height="32" rx="7" class="pill"/><text x="686" y="205" class="t1" font-size="9.5" font-weight="600" text-anchor="middle">ZEXALL + SingleStepTests</text>
+
+<!-- P3 gate -->
+<rect x="54" y="238" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="267" r="13" class="num"/><text x="74" y="271" class="numt" font-size="12" text-anchor="middle">3</text>
+<text x="96" y="263" class="t1" font-size="12.5" font-weight="700">Validate vs MAME</text>
+<text x="96" y="281" class="t2" font-size="9.3" font-style="italic">ability: prove it &#8801; hardware on the boot window</text>
+<rect x="372" y="243" width="216" height="23" rx="6" class="inb"/><text x="380" y="258" font-size="8.5" class="inl">IN</text><text x="398" y="258" font-size="9" class="t1">input scripts + stock MAME</text>
+<rect x="372" y="268" width="216" height="23" rx="6" class="outb"/><text x="380" y="283" font-size="8.5" class="outl">OUT</text><text x="402" y="283" font-size="9" class="t1">golden hashes (boot regression)</text>
+<rect x="600" y="251" width="172" height="32" rx="7" class="gate"/><text x="686" y="265" class="t1" font-size="8" font-weight="700" text-anchor="middle">&#9733; GATE 1 &#183; BOOT-WINDOW EQUIV.</text><text x="686" y="277" class="t1" font-size="9.5" font-weight="700" text-anchor="middle">MAME golden frames 0&#8211;258</text>
+
+<!-- ===== BAND B ===== -->
+<text x="40" y="318" class="t1" font-size="12" font-weight="700">&#9313; UNDERSTAND</text>
+<text x="780" y="318" class="t2" font-size="9.5" text-anchor="end">runtime: the boot-window-trusted emulator</text>
+<line x1="40" y1="324" x2="780" y2="324" class="rule"/>
+
+<!-- P4 -->
+<rect x="54" y="330" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="359" r="13" class="num"/><text x="74" y="363" class="numt" font-size="12" text-anchor="middle">4</text>
+<text x="96" y="355" class="t1" font-size="12.5" font-weight="700">Capture traces</text>
+<text x="96" y="373" class="t2" font-size="9.3" font-style="italic">ability: byte-stable record of every routine</text>
+<rect x="372" y="335" width="216" height="23" rx="6" class="inb"/><text x="380" y="350" font-size="8.5" class="inl">IN</text><text x="398" y="350" font-size="9" class="t1">input scripts + trusted machine</text>
+<rect x="372" y="360" width="216" height="23" rx="6" class="outb"/><text x="380" y="375" font-size="8.5" class="outl">OUT</text><text x="402" y="375" font-size="9" class="t1">per-call traces + call graph</text>
+<rect x="600" y="343" width="172" height="32" rx="7" class="pill"/><text x="686" y="357" class="t1" font-size="9" font-weight="600" text-anchor="middle">byte-identical replay</text><text x="686" y="369" class="t1" font-size="9" font-weight="600" text-anchor="middle">+ traces &#8801; MAME (T4.2, input-keyed)</text>
+
+<!-- P5 -->
+<rect x="54" y="396" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="425" r="13" class="num"/><text x="74" y="429" class="numt" font-size="12" text-anchor="middle">5</text>
+<text x="96" y="421" class="t1" font-size="12.5" font-weight="700">Determinism / RNG audit</text>
+<text x="96" y="439" class="t2" font-size="9.3" font-style="italic">ability: explain every &#8220;random&#8221; value</text>
+<rect x="372" y="401" width="216" height="23" rx="6" class="inb"/><text x="380" y="416" font-size="8.5" class="inl">IN</text><text x="398" y="416" font-size="9" class="t1">traces + hardware contract</text>
+<rect x="372" y="426" width="216" height="23" rx="6" class="outb"/><text x="380" y="441" font-size="8.5" class="outl">OUT</text><text x="402" y="441" font-size="9" class="t1">list of RNG read-sites</text>
+<rect x="600" y="409" width="172" height="32" rx="7" class="pill"/><text x="686" y="429" class="t1" font-size="10" font-weight="600" text-anchor="middle">reproducible traces</text>
+
+<!-- P6 -->
+<rect x="54" y="462" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="491" r="13" class="num"/><text x="74" y="495" class="numt" font-size="12" text-anchor="middle">6</text>
+<text x="96" y="487" class="t1" font-size="12.5" font-weight="700">Annotate</text>
+<text x="96" y="505" class="t2" font-size="9.3" font-style="italic">ability: read the code like reviewed source</text>
+<rect x="372" y="467" width="216" height="23" rx="6" class="inb"/><text x="380" y="482" font-size="8.5" class="inl">IN</text><text x="398" y="482" font-size="9" class="t1">traces + disassembly</text>
+<rect x="372" y="492" width="216" height="23" rx="6" class="outb"/><text x="380" y="507" font-size="8.5" class="outl">OUT</text><text x="402" y="507" font-size="9" class="t1">named routines + RAM map</text>
+<rect x="600" y="475" width="172" height="32" rx="7" class="pill"/><text x="686" y="495" class="t1" font-size="10" font-weight="600" text-anchor="middle">Frenzy source (score)</text>
+
+<!-- ===== BAND C ===== -->
+<text x="40" y="542" class="t1" font-size="12" font-weight="700">&#9314; PORT</text>
+<text x="780" y="542" class="t2" font-size="9.5" text-anchor="end">runtime: emulator &#8594; hybrid (Z80 + JS share memory)</text>
+<line x1="40" y1="548" x2="780" y2="548" class="rule"/>
+
+<!-- P7 -->
+<rect x="54" y="554" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="583" r="13" class="num"/><text x="74" y="587" class="numt" font-size="12" text-anchor="middle">7</text>
+<text x="96" y="579" class="t1" font-size="12.5" font-weight="700">Generate tests</text>
+<text x="96" y="597" class="t2" font-size="9.3" font-style="italic">ability: acceptance tests, generated not written</text>
+<rect x="372" y="559" width="216" height="23" rx="6" class="inb"/><text x="380" y="574" font-size="8.5" class="inl">IN</text><text x="398" y="574" font-size="9" class="t1">traces + annotations</text>
+<rect x="372" y="584" width="216" height="23" rx="6" class="outb"/><text x="380" y="599" font-size="8.5" class="outl">OUT</text><text x="402" y="599" font-size="9" class="t1">per-routine JSONL cases</text>
+<rect x="600" y="567" width="172" height="32" rx="7" class="pill"/><text x="686" y="587" class="t1" font-size="10" font-weight="600" text-anchor="middle">self-check on machine</text>
+
+<!-- P8 gate -->
+<rect x="54" y="620" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="649" r="13" class="num"/><text x="74" y="653" class="numt" font-size="12" text-anchor="middle">8</text>
+<text x="96" y="645" class="t1" font-size="12.5" font-weight="700">Test bench</text>
+<text x="96" y="663" class="t2" font-size="9.3" font-style="italic">ability: prove each routine &#8801; its trace</text>
+<rect x="372" y="625" width="216" height="23" rx="6" class="inb"/><text x="380" y="640" font-size="8.5" class="inl">IN</text><text x="398" y="640" font-size="9" class="t1">JSONL test cases</text>
+<rect x="372" y="650" width="216" height="23" rx="6" class="outb"/><text x="380" y="665" font-size="8.5" class="outl">OUT</text><text x="402" y="665" font-size="9" class="t1">bench wired into npm test</text>
+<rect x="600" y="633" width="172" height="32" rx="7" class="gate"/><text x="686" y="647" class="t1" font-size="8" font-weight="700" text-anchor="middle">&#9733; GATE 2 &#183; GAMEPLAY EQUIV.</text><text x="686" y="659" class="t1" font-size="9.5" font-weight="700" text-anchor="middle">hermetic per-routine bench</text>
+
+<!-- P9 -->
+<rect x="54" y="686" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="715" r="13" class="num"/><text x="74" y="719" class="numt" font-size="12" text-anchor="middle">9</text>
+<text x="96" y="711" class="t1" font-size="12.5" font-weight="700">Port routines, one at a time</text>
+<text x="96" y="729" class="t2" font-size="9.3" font-style="italic">ability: swap a routine, proof nothing changed</text>
+<rect x="372" y="691" width="216" height="23" rx="6" class="inb"/><text x="380" y="706" font-size="8.5" class="inl">IN</text><text x="398" y="706" font-size="9" class="t1">annotations + tests + machine</text>
+<rect x="372" y="716" width="216" height="23" rx="6" class="outb"/><text x="380" y="731" font-size="8.5" class="outl">OUT</text><text x="402" y="731" font-size="9" class="t1">JS routines hooked at CALLs</text>
+<rect x="600" y="699" width="172" height="32" rx="7" class="pill"/><text x="686" y="713" class="t1" font-size="9" font-weight="600" text-anchor="middle">bench green (per routine)</text><text x="686" y="725" class="t1" font-size="9" font-weight="600" text-anchor="middle">+ golden boot stays green</text>
+
+<!-- ===== BAND D ===== -->
+<text x="40" y="766" class="t1" font-size="12" font-weight="700">&#9315; FINISH</text>
+<text x="780" y="766" class="t2" font-size="9.5" text-anchor="end">runtime: pure JavaScript</text>
+<line x1="40" y1="772" x2="780" y2="772" class="rule"/>
+
+<!-- P10 -->
+<rect x="54" y="778" width="726" height="58" rx="8" class="row"/>
+<circle cx="74" cy="807" r="13" class="num"/><text x="74" y="811" class="numt" font-size="12" text-anchor="middle">10</text>
+<text x="96" y="803" class="t1" font-size="12.5" font-weight="700">Ship two build targets</text>
+<text x="96" y="821" class="t2" font-size="9.3" font-style="italic">ability: native (core-free) + emulator, one codebase</text>
+<rect x="372" y="783" width="216" height="23" rx="6" class="inb"/><text x="380" y="798" font-size="8.5" class="inl">IN</text><text x="398" y="798" font-size="9" class="t1">100% ported machine</text>
+<rect x="372" y="808" width="216" height="23" rx="6" class="outb"/><text x="380" y="823" font-size="8.5" class="outl">OUT</text><text x="402" y="823" font-size="9" class="t1">native + emulator (shared code)</text>
+<rect x="600" y="791" width="172" height="32" rx="7" class="pill"/><text x="686" y="811" class="t1" font-size="10" font-weight="600" text-anchor="middle">flush test + feel</text>
+
+<!-- footer -->
+<rect x="40" y="848" width="740" height="76" rx="9" fill="#fadfb4" opacity=".38"/>
+<text x="54" y="866" class="t1" font-size="10.5"><tspan font-weight="700">The thread &#8212; never trust:</tspan> anchor every step to something already proven. Two gates, not one.</text>
+<text x="54" y="881" class="t2" font-size="9.5">CPU &#8594; ZEXALL+SST &#183; machine &#8594; MAME (boot window 0&#8211;258) &#183; routine trace &#8594; MAME (input-keyed)</text>
+<text x="54" y="895" class="t2" font-size="9.5">each routine &#8594; its trace (hermetic bench) &#183; finished game &#8594; bench + boot regression.</text>
+<text x="54" y="915" class="t2" font-size="9.5">Artifact: emulator &#8594; hybrid &#8594; native (emulator retained as oracle).  Reusable for the next Z80 game; only phases 1&#8211;2 &amp; 6 are game-specific.</text>
+
+<!-- status band (separate from the diagram) -->
+<rect x="40" y="948" width="740" height="48" rx="9" fill="#e7f0ff" stroke="#bcd4f5" stroke-width="1"/>
+<rect x="40" y="948" width="5" height="48" rx="2.5" fill="#3b82f6"/>
+<text x="58" y="967" class="t1" font-size="10.5" font-weight="700">STATUS &#183; 2026-06-22</text>
+<text x="58" y="982" class="t1" font-size="9.5">Phases 1&#8211;8 <tspan font-weight="700">done</tspan>.  Phase 9 at the Scope-A ceiling: 37 routines ported, hybrid plays &#8212; spot-play sign-off + MAME goldens pending.  Phase 10 (Scope B) deferred.</text>
+</svg>

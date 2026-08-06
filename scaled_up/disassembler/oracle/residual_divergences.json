@@ -1,0 +1,27 @@
+[
+  {
+    "addr": "0x601",
+    "ref": "(hatch pattern)",
+    "decoder": "ld a,a"
+  },
+  {
+    "addr": "0x603",
+    "ref": "0.",
+    "decoder": "jr nc,$0605"
+  },
+  {
+    "addr": "0x1e5e",
+    "ref": "ld hl,",
+    "decoder": "ld hl,$ffe8"
+  },
+  {
+    "addr": "0x27bc",
+    "ref": "ld de,",
+    "decoder": "ld de,$fffa"
+  },
+  {
+    "addr": "0x37ca",
+    "ref": "db $dd",
+    "decoder": "<None>"
+  }
+]
